@@ -1,0 +1,1424 @@
+"""長期投資決策工具 — Streamlit App"""
+import sys
+from pathlib import Path
+
+# Ensure local modules are importable when running `streamlit run app.py`
+sys.path.insert(0, str(Path(__file__).parent))
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import plotly.express as px
+from datetime import datetime
+
+from utils.data_fetcher import fetch_ticker, get_all_data, safe_float, get_fx_rate
+from utils.search import search_stocks
+from utils import glossary
+from utils.notifier import (
+    send, build_message,
+    get_topic, set_topic, get_server, set_server,
+    get_scan_times, set_scan_times,
+    get_dedup_hours, set_dedup_hours,
+    get_signal_filter, set_signal_filter,
+)
+from utils import scheduler
+from modules import fundamental, risk, valuation, allocation, position, portfolio, market_regime
+from database.db import (
+    save_analysis, get_history,
+    add_to_watchlist, get_watchlist, remove_from_watchlist,
+    add_transaction, get_transactions, delete_transaction,
+    get_holdings, get_avg_cost,
+)
+
+# ─────────────────────────────────────────────
+# Page config
+# ─────────────────────────────────────────────
+st.set_page_config(
+    page_title="長期投資決策工具",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+st.markdown("""
+<style>
+    .metric-card {
+        background: #1e1e2e;
+        border-radius: 10px;
+        padding: 16px;
+        margin: 4px;
+    }
+    .big-score {
+        font-size: 3rem;
+        font-weight: 700;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────
+def score_gauge(score: float, title: str, max_val: float = 100) -> go.Figure:
+    color = "#2ecc71" if score >= 70 else "#3498db" if score >= 50 else "#e74c3c"
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=score,
+        title={"text": title, "font": {"size": 14}},
+        gauge={
+            "axis": {
+                "range": [0, max_val],
+                "tickmode": "array",
+                "tickvals": [0, 25, 50, 75, 100],
+                "tickfont": {"size": 10},
+            },
+            "bar": {"color": color},
+            "steps": [
+                {"range": [0, 50], "color": "#2d0e0e"},
+                {"range": [50, 70], "color": "#2d1f0e"},
+                {"range": [70, 85], "color": "#0e2d1a"},
+                {"range": [85, 100], "color": "#0a2b18"},
+            ],
+            "threshold": {"line": {"color": "white", "width": 2}, "thickness": 0.75, "value": score},
+        },
+    ))
+    fig.update_layout(height=210, margin=dict(l=30, r=30, t=40, b=0))
+    return fig
+
+
+def price_chart(history: pd.DataFrame, symbol: str) -> go.Figure:
+    if history.empty:
+        return go.Figure()
+
+    fig = go.Figure()
+
+    # Candlestick (last 1 year)
+    recent = history.tail(252)
+    fig.add_trace(go.Scatter(
+        x=recent.index, y=recent["Close"],
+        name="收盤價", line=dict(color="#3498db", width=1.5),
+    ))
+
+    # MA50
+    ma50 = history["Close"].rolling(50).mean().tail(252)
+    fig.add_trace(go.Scatter(
+        x=ma50.index, y=ma50,
+        name="MA50", line=dict(color="#f39c12", width=1, dash="dot"),
+    ))
+
+    # MA200
+    if len(history) >= 200:
+        ma200 = history["Close"].rolling(200).mean().tail(252)
+        fig.add_trace(go.Scatter(
+            x=ma200.index, y=ma200,
+            name="MA200", line=dict(color="#e74c3c", width=1.5, dash="dash"),
+        ))
+
+    fig.update_layout(
+        title=dict(text=f"{symbol} 近1年價格走勢", x=0, xanchor="left", font=dict(size=14)),
+        xaxis_title="日期",
+        yaxis_title="價格",
+        height=370,
+        margin=dict(l=20, r=20, t=40, b=50),
+        legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
+        plot_bgcolor="#0e1117",
+        paper_bgcolor="#0e1117",
+        font=dict(color="white"),
+    )
+    return fig
+
+
+def fundamental_bar(details: dict) -> go.Figure:
+    labels = list(details.keys())
+    scores = [v[0] for v in details.values()]
+    max_scores = [v[1] for v in details.values()]
+    colors = ["#2ecc71" if s / m >= 0.7 else "#f39c12" if s / m >= 0.4 else "#e74c3c"
+              for s, m in zip(scores, max_scores)]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=labels, y=max_scores, name="滿分", marker_color="#2d3748", opacity=0.5,
+    ))
+    fig.add_trace(go.Bar(
+        x=labels, y=scores, name="得分", marker_color=colors,
+    ))
+    fig.update_layout(
+        barmode="overlay",
+        height=280,
+        margin=dict(l=10, r=10, t=10, b=40),
+        plot_bgcolor="#0e1117",
+        paper_bgcolor="#0e1117",
+        font=dict(color="white"),
+        legend=dict(orientation="h", yanchor="top", y=-0.12, xanchor="center", x=0.5),
+    )
+    return fig
+
+
+def allocation_pie(invest_ratio: float, cash_ratio: float) -> go.Figure:
+    fig = go.Figure(go.Pie(
+        labels=["本月投入", "保留現金"],
+        values=[invest_ratio, max(0, cash_ratio)],
+        hole=0.5,
+        marker_colors=["#2ecc71", "#95a5a6"],
+    ))
+    fig.update_layout(
+        height=220,
+        margin=dict(l=10, r=10, t=20, b=10),
+        paper_bgcolor="#0e1117",
+        font=dict(color="white"),
+        showlegend=True,
+        legend=dict(orientation="h"),
+    )
+    return fig
+
+
+# ─────────────────────────────────────────────
+# Session state init
+# ─────────────────────────────────────────────
+if "auto_analyze" not in st.session_state:
+    st.session_state["auto_analyze"] = False
+if "mode" not in st.session_state:
+    st.session_state["mode"] = "單檔分析"
+
+
+@st.dialog("📚 投資指標完整說明", width="large")
+def _show_glossary_dialog():
+    st.caption("這是工具用到的所有指標、公式、判讀標準，分類整理供你隨時查閱")
+    _section_titles = [t for t, _ in glossary.ALL_SECTIONS]
+    _tabs = st.tabs(_section_titles)
+    for _tab, (_title, _body) in zip(_tabs, glossary.ALL_SECTIONS):
+        with _tab:
+            st.markdown(_body)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_market_regime() -> dict:
+    return market_regime.analyze()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_index_history(symbol: str, period: str = "1y"):
+    """Fetch index history for chart rendering. Returns dict with close/ma50/ma200/dates."""
+    import yfinance as yf
+    try:
+        hist = yf.Ticker(symbol).history(period=period)
+        if hist.empty:
+            return None
+        return {
+            "dates": [d.strftime("%Y-%m-%d") for d in hist.index],
+            "close": hist["Close"].tolist(),
+            "ma50": hist["Close"].rolling(50).mean().tolist(),
+            "ma200": hist["Close"].rolling(200).mean().tolist(),
+        }
+    except Exception:
+        return None
+
+
+def _index_chart(data: dict, title: str, color: str = "#3498db") -> go.Figure:
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=data["dates"], y=data["close"],
+        name="收盤", line=dict(color=color, width=2),
+    ))
+    fig.add_trace(go.Scatter(
+        x=data["dates"], y=data["ma50"],
+        name="MA50", line=dict(color="#f39c12", width=1, dash="dot"),
+    ))
+    fig.add_trace(go.Scatter(
+        x=data["dates"], y=data["ma200"],
+        name="MA200", line=dict(color="#e74c3c", width=1.5, dash="dash"),
+    ))
+    fig.update_layout(
+        title=dict(text=title, x=0, xanchor="left", font=dict(size=14)),
+        height=280,
+        margin=dict(l=40, r=20, t=40, b=30),
+        legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
+        xaxis=dict(showgrid=False),
+        yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)"),
+        hovermode="x unified",
+    )
+    return fig
+
+
+def _render_market_charts():
+    """大盤走勢圖：S&P 500 + 台股加權，並列顯示。"""
+    spx = _cached_index_history("^GSPC")
+    twii = _cached_index_history("^TWII")
+
+    if not spx and not twii:
+        return
+
+    col_us, col_tw = st.columns(2)
+    with col_us:
+        if spx:
+            st.plotly_chart(_index_chart(spx, "🇺🇸 S&P 500（近一年）", "#3498db"),
+                            use_container_width=True)
+        else:
+            st.caption("無法取得 S&P 500 資料")
+    with col_tw:
+        if twii:
+            st.plotly_chart(_index_chart(twii, "🇹🇼 台股加權（近一年）", "#2ecc71"),
+                            use_container_width=True)
+        else:
+            st.caption("無法取得台股加權資料")
+
+
+def _render_market_banner(compact: bool = True):
+    """頂部市場狀態 banner — 所有模式共用。"""
+    regime = _cached_market_regime()
+    if not regime.get("available"):
+        return
+    color = regime["color"]
+    vix = regime["vix"]
+    spx_bias = regime["spx"]["bias_ma200_pct"]
+    mult = regime["budget_multiplier"]
+    label = regime["regime"]
+    desc = regime["description"]
+
+    cols = st.columns([1.2, 1, 1, 2])
+    with cols[0]:
+        st.markdown(
+            f"<div style='background:{color};color:white;padding:10px 14px;"
+            f"border-radius:10px;text-align:center;font-weight:700;font-size:1.1rem'>"
+            f"市場狀態：{label}</div>",
+            unsafe_allow_html=True,
+        )
+    cols[1].metric("VIX", f"{vix:.1f}", help="< 20 平靜 / 20–28 不安 / > 28 恐慌")
+    cols[2].metric("SPX vs MA200", f"{spx_bias:+.1f}%")
+    cols[3].metric("資金乘數", f"×{mult:.2f}", help=desc)
+
+# ─────────────────────────────────────────────
+# Sidebar
+# ─────────────────────────────────────────────
+with st.sidebar:
+    st.title("📈 長期投資決策工具")
+    st.caption("基本面 × 估值 × 資金管理")
+
+    _modes = [
+        ("單檔分析", "📊"),
+        ("多標配置", "🎯"),
+        ("帳務", "📒"),
+    ]
+    for _name, _icon in _modes:
+        _is_active = st.session_state["mode"] == _name
+        if st.button(
+            f"{_icon}  {_name}",
+            key=f"mode_btn_{_name}",
+            use_container_width=True,
+            type="primary" if _is_active else "secondary",
+        ):
+            st.session_state["mode"] = _name
+            st.rerun()
+    mode = st.session_state["mode"]
+
+    if st.button("📚 指標說明（隨時複習）", use_container_width=True, key="open_glossary"):
+        _show_glossary_dialog()
+    st.divider()
+
+    # 用 session_state 持久化股票代碼，避免 rerun 後丟失
+    if "symbol_text" not in st.session_state:
+        st.session_state["symbol_text"] = ""
+    # 自選清單點選時把 prefill 移入 symbol_text
+    if "symbol_prefill" in st.session_state:
+        st.session_state["symbol_text"] = st.session_state.pop("symbol_prefill")
+
+    symbol_input = st.text_input(
+        "股票代碼 / 名稱",
+        key="symbol_text",
+        placeholder="輸入代碼或名稱：Tesla / 台積電 / 2330 / VOO",
+        help="可輸入代碼（TSLA、2330、0050）或公司名稱（Tesla、台積電）",
+    ).strip()
+
+    # ── 智能建議：輸入時自動顯示符合的候選 ──
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _cached_search(q: str):
+        return search_stocks(q, limit=6)
+
+    _is_exact_ticker = (
+        symbol_input.isdigit()                       # 純數字（台股）
+        or "." in symbol_input                       # 含後綴 (.TW / .HK)
+        or (symbol_input.isalpha() and symbol_input.isupper() and 1 <= len(symbol_input) <= 5)  # 全大寫英文代碼
+    )
+
+    if symbol_input and len(symbol_input) >= 2:
+        with st.spinner("搜尋中...") if not _is_exact_ticker else st.empty():
+            _matches = _cached_search(symbol_input)
+        # 排除跟當前輸入完全相同的（避免列自己）
+        _matches = [m for m in _matches if m["symbol"].upper() != symbol_input.upper()]
+        if _matches:
+            st.caption("🔍 可能符合（點選即分析）：")
+            for _idx, m in enumerate(_matches[:5]):
+                _lbl = f"{m['symbol']}  ·  {m['name'][:22]}"
+                if m.get("exchange"):
+                    _lbl += f"  ({m['exchange']})"
+                if st.button(_lbl, key=f"match_{_idx}_{m['symbol']}", use_container_width=True):
+                    st.session_state["symbol_prefill"] = m["symbol"]
+                    st.session_state["auto_analyze"] = True
+                    st.rerun()
+
+    st.subheader("資金設定")
+    monthly_budget = st.number_input(
+        "每月預算（新台幣 NT$）",
+        min_value=1000,
+        max_value=10_000_000,
+        value=10_000,
+        step=1000,
+        format="%d",
+    )
+
+    risk_pref = st.radio(
+        "風險偏好",
+        ["保守", "中性", "積極"],
+        index=1,
+        horizontal=True,
+    )
+
+    st.subheader("持倉資訊（選填）")
+    cost_basis = st.number_input(
+        "平均持有成本",
+        min_value=0.0,
+        value=0.0,
+        step=0.01,
+        help="輸入 0 表示尚未持有",
+    )
+
+    _analyze_clicked = st.button("開始分析", type="primary", use_container_width=True)
+    # 觸發分析後保持「已分析」狀態，rerun 不會丟掉結果
+    if _analyze_clicked or st.session_state.get("auto_analyze", False):
+        st.session_state["analyzed_symbol"] = symbol_input
+        st.session_state["auto_analyze"] = False
+
+    # 只要 analyzed_symbol 還是當前輸入，就持續顯示分析結果
+    analyze_btn = bool(
+        symbol_input
+        and st.session_state.get("analyzed_symbol", "").upper() == symbol_input.upper()
+    )
+    st.divider()
+
+    # Watchlist
+    st.subheader("自選清單")
+    st.caption("點代碼可直接分析")
+    watchlist = get_watchlist()
+    if watchlist:
+        for item in watchlist:
+            col1, col2 = st.columns([3, 1])
+            if col1.button(item["symbol"], key=f"wl_{item['symbol']}", use_container_width=True):
+                st.session_state["symbol_prefill"] = item["symbol"]
+                st.session_state["auto_analyze"] = True
+                st.rerun()
+            if col2.button("×", key=f"rm_{item['symbol']}"):
+                remove_from_watchlist(item["symbol"])
+                st.rerun()
+    else:
+        st.caption("（尚無標的）")
+
+    if symbol_input and st.button("加入自選", use_container_width=True):
+        add_to_watchlist(symbol_input)
+        st.success(f"{symbol_input.upper()} 已加入自選")
+        st.rerun()
+
+    st.divider()
+
+    # ntfy.sh push notification settings
+    st.subheader("推播通知設定 (ntfy.sh)")
+    st.caption("手機下載 ntfy App → 訂閱下方主題 → 即可收到警報")
+
+    _saved_topic = get_topic() or ""
+    _topic_input = st.text_input(
+        "通知主題 (Topic)",
+        value=_saved_topic,
+        placeholder="例：my-invest-alerts-9j2k",
+        help="自訂一組難猜的字串當主題，任何人知道都能訂閱，請勿用常見字",
+    )
+    if _topic_input != _saved_topic:
+        set_topic(_topic_input)
+        st.success("主題已儲存")
+
+    with st.expander("進階：自訂 ntfy 伺服器"):
+        _saved_server = get_server()
+        _server_input = st.text_input(
+            "Server URL",
+            value=_saved_server,
+            help="預設 https://ntfy.sh，可改成自架伺服器",
+        )
+        if _server_input != _saved_server:
+            set_server(_server_input)
+            st.success("Server 已儲存")
+
+    if _topic_input:
+        if st.button("發送測試通知", use_container_width=True):
+            ok, msg = send(
+                "ntfy 連線測試成功！",
+                _topic_input,
+                title="✅ 投資工具測試",
+                tags="white_check_mark",
+            )
+            st.success(msg) if ok else st.error(msg)
+    else:
+        st.caption("設定主題後可接收補倉/減碼警報")
+
+    st.divider()
+
+    # ── 自動掃描設定 ─────────────────────────────
+    st.subheader("自動掃描排程")
+    st.caption("Windows 工作排程器每日定時掃描自選清單，觸發訊號自動推播")
+
+    _saved_times = get_scan_times()
+    _scan_count = st.number_input(
+        "每日掃描次數",
+        min_value=1,
+        max_value=6,
+        value=len(_saved_times) if 1 <= len(_saved_times) <= 6 else 3,
+        step=1,
+    )
+
+    _time_inputs = []
+    _defaults = (_saved_times + ["09:00", "13:30", "21:30", "07:00", "12:00", "18:00"])[:_scan_count]
+    for i in range(_scan_count):
+        try:
+            hh, mm = _defaults[i].split(":")
+            from datetime import time as _t
+            _default_time = _t(int(hh), int(mm))
+        except Exception:
+            _default_time = None
+        t = st.time_input(
+            f"第 {i+1} 次掃描時間",
+            value=_default_time,
+            key=f"scan_time_{i}",
+            step=300,
+        )
+        _time_inputs.append(t.strftime("%H:%M"))
+
+    _dedup = st.slider(
+        "同訊號去重時間（小時）",
+        min_value=1, max_value=168, value=get_dedup_hours(), step=1,
+        help="同一檔股票同一訊號在此時間內只通知一次",
+    )
+
+    _sig = get_signal_filter()
+    _col_a, _col_b = st.columns(2)
+    _sig_add = _col_a.checkbox("補倉訊號", value=_sig["add"])
+    _sig_red = _col_b.checkbox("減碼訊號", value=_sig["reduce"])
+
+    if st.button("儲存並安裝排程", type="primary", use_container_width=True):
+        set_scan_times(_time_inputs)
+        set_dedup_hours(_dedup)
+        set_signal_filter(_sig_add, _sig_red)
+        ok, msg = scheduler.install_tasks(_time_inputs)
+        if ok:
+            st.success(f"✅ {msg}")
+        else:
+            st.error(msg)
+
+    _existing = scheduler.list_tasks()
+    if _existing:
+        with st.expander(f"目前已安裝 {len(_existing)} 個排程"):
+            for t in _existing:
+                st.code(t, language=None)
+            if st.button("移除全部排程", use_container_width=True):
+                ok, msg = scheduler.uninstall_all()
+                st.success(msg) if ok else st.error(msg)
+                st.rerun()
+
+    if st.button("立即掃描一次（測試）", use_container_width=True):
+        with st.spinner("掃描中..."):
+            ok, output = scheduler.run_now()
+        if ok:
+            st.success("掃描完成，詳見 data/scan.log")
+        else:
+            st.error("掃描失敗")
+        with st.expander("執行輸出"):
+            st.code(output or "(無輸出)", language=None)
+
+
+# ─────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────
+st.title("長期投資決策工具")
+
+# 全局市場狀態 banner + 大盤走勢圖
+_render_market_banner()
+_render_market_charts()
+st.divider()
+
+# ─────────────────────────────────────────────
+# 多標配置模式
+# ─────────────────────────────────────────────
+if mode == "多標配置":
+    st.subheader("🎯 多標的資產配置")
+    st.caption("從已分析過的股票中挑選，依基本面 × 風險 × 估值自動計算建議權重")
+
+    hist = get_history(limit=50, unique_symbols=True)
+    if not hist:
+        st.info("尚無分析紀錄，請先到「單檔分析」分析幾檔股票後再回來配置")
+        st.stop()
+
+    hist_map = {h["symbol"]: h for h in hist}
+    all_syms = list(hist_map.keys())
+    wl_syms = {w["symbol"] for w in get_watchlist()}
+    default_syms = [s for s in all_syms if s in wl_syms] or all_syms[: min(5, len(all_syms))]
+
+    picked = st.multiselect(
+        "挑選標的（預設自選清單中的標的）",
+        all_syms,
+        default=default_syms,
+        help="先在「單檔分析」分析過的股票才會出現在此",
+    )
+
+    col_budget, col_cap, col_min, col_mkt = st.columns(4)
+    with col_budget:
+        port_budget = st.number_input(
+            "總投入資金（NT$）",
+            min_value=10_000,
+            max_value=100_000_000,
+            value=300_000,
+            step=10_000,
+            format="%d",
+        )
+    with col_cap:
+        max_single = st.slider("單檔上限 (%)", 10, 100, 30, 5) / 100
+    with col_min:
+        min_score = st.slider("最低基本面分數", 0, 100, 50, 5)
+    with col_mkt:
+        _reg = _cached_market_regime()
+        _default_apply = _reg.get("available", False)
+        apply_market = st.checkbox(
+            "套用市場乘數",
+            value=_default_apply,
+            help=f"目前 {_reg.get('regime','N/A')} ×{_reg.get('budget_multiplier',1):.2f}" if _default_apply else "無法取得大盤資料",
+        )
+
+    if apply_market and _reg.get("available"):
+        port_budget_eff = port_budget * _reg["budget_multiplier"]
+        st.caption(f"💡 大盤「{_reg['regime']}」乘數 ×{_reg['budget_multiplier']:.2f}：實際配置資金 NT${port_budget_eff:,.0f}")
+    else:
+        port_budget_eff = port_budget
+
+    if not picked:
+        st.warning("請至少選一檔標的")
+        st.stop()
+
+    stocks = []
+    for sym in picked:
+        h = hist_map[sym]
+        stocks.append({
+            "symbol": sym,
+            "fundamental_score": h.get("fundamental_score") or 0,
+            "risk_level": h.get("risk_level"),
+            "valuation_status": h.get("valuation_status"),
+            "recommendation": h.get("recommendation"),
+            "analyzed_at": h.get("analyzed_at", "")[:16],
+        })
+
+    result = portfolio.allocate(
+        stocks,
+        total_budget=port_budget_eff,
+        max_single=max_single,
+        min_score=float(min_score),
+    )
+
+    allocs = result["allocations"]
+    excluded = result["excluded"]
+
+    if not allocs:
+        st.error("所選標的全部不符合配置條件（見下方排除清單）")
+    else:
+        # Summary metrics
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("納入標的", f"{len(allocs)} 檔")
+        m2.metric("排除標的", f"{len(excluded)} 檔")
+        avg_score = sum(a["fundamental_score"] for a in allocs) / len(allocs)
+        m3.metric("組合平均基本面", f"{avg_score:.0f} / 100")
+        m4.metric("總投入", f"NT${port_budget_eff:,.0f}")
+
+        st.divider()
+
+        # Pie chart + table side by side
+        col_pie, col_tbl = st.columns([1, 1.3])
+        with col_pie:
+            pie = go.Figure(go.Pie(
+                labels=[a["symbol"] for a in allocs],
+                values=[a["weight"] for a in allocs],
+                hole=0.45,
+                textinfo="label+percent",
+                hovertemplate="<b>%{label}</b><br>權重 %{percent}<br>金額 NT$%{customdata:,.0f}<extra></extra>",
+                customdata=[a["amount"] for a in allocs],
+            ))
+            pie.update_layout(
+                title="資金配置比例",
+                height=380,
+                margin=dict(l=10, r=10, t=50, b=10),
+                showlegend=False,
+            )
+            st.plotly_chart(pie, use_container_width=True)
+
+        with col_tbl:
+            rows = []
+            for a in allocs:
+                rows.append({
+                    "代碼": a["symbol"],
+                    "權重": f"{a['weight']*100:.1f}%",
+                    "投入 (NT$)": f"{a['amount']:,.0f}",
+                    "基本面": f"{a['fundamental_score']:.0f}",
+                    "風險": a.get("risk_level") or "-",
+                    "估值": a.get("valuation_status") or "-",
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.subheader("配置理由")
+        for a in allocs:
+            st.markdown(f"**{a['symbol']}** — {a['weight']*100:.1f}%  ·  NT${a['amount']:,.0f}")
+            st.caption(a["rationale"])
+
+    if excluded:
+        with st.expander(f"排除清單（{len(excluded)} 檔）"):
+            ex_rows = [{
+                "代碼": e["symbol"],
+                "基本面": f"{(e.get('fundamental_score') or 0):.0f}",
+                "建議": e.get("recommendation") or "-",
+                "排除原因": e.get("exclude_reason", ""),
+            } for e in excluded]
+            st.dataframe(pd.DataFrame(ex_rows), use_container_width=True, hide_index=True)
+
+    st.stop()
+
+
+# ─────────────────────────────────────────────
+# 帳務模式
+# ─────────────────────────────────────────────
+if mode == "帳務":
+    from datetime import date as _date, timedelta as _td
+    st.subheader("📒 帳務")
+    st.caption("記錄每筆買賣，自動計算加權平均成本，給自動掃描判斷補倉訊號")
+
+    def _classify_market(symbol: str, currency: str = None) -> str:
+        s = (symbol or "").upper()
+        if s.endswith(".TW") or s.endswith(".TWO"):
+            return "台股"
+        if currency == "TWD":
+            return "台股"
+        # 純數字（4-6 碼）= 台股代號（即使存檔時沒加 .TW）
+        if s.isdigit() and 4 <= len(s) <= 6:
+            return "台股"
+        if currency == "USD" or s.isalpha():
+            return "美股"
+        return "其他"
+
+    _market_filter = st.radio(
+        "市場",
+        ["🌐 全部", "🇹🇼 台股", "🇺🇸 美股"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    _market_key = {"🌐 全部": None, "🇹🇼 台股": "台股", "🇺🇸 美股": "美股"}[_market_filter]
+
+    # ── 新增交易 form ─────────────────────────
+    with st.expander("➕ 新增交易", expanded=False):
+        with st.form("add_tx", clear_on_submit=True):
+            c1, c2, c3 = st.columns([1, 1, 1])
+            tx_symbol = c1.text_input("股票代碼", placeholder="例：2330 / TSLA").strip().upper()
+            tx_action = c2.selectbox("買賣", ["買進", "賣出"])
+            tx_date = c3.date_input("交易日期", value=_date.today())
+
+            c4, c5, c6 = st.columns([1, 1, 1])
+            tx_price = c4.number_input("成交單價（原幣）", min_value=0.0, value=0.0, step=0.01, format="%.4f")
+            tx_shares = c5.number_input("股數", min_value=0.0, value=0.0, step=1.0, format="%.4f")
+            tx_currency = c6.selectbox("計價幣別", ["TWD", "USD", "HKD", "JPY", "EUR"], index=0)
+
+            c7, c8 = st.columns([1, 1])
+            _auto_twd = tx_price * tx_shares if tx_currency == "TWD" else 0.0
+            tx_twd = c7.number_input(
+                "台幣總額（手續費含）", min_value=0.0, value=_auto_twd, step=100.0, format="%.0f",
+                help="非台股可手動輸入實際扣款金額；台股留空會自動 = 單價 × 股數",
+            )
+            tx_note = c8.text_input("備註（選填）", placeholder="如：定期定額 / 第X次補倉")
+
+            submitted = st.form_submit_button("儲存交易", type="primary", use_container_width=True)
+            if submitted:
+                if not tx_symbol or tx_price <= 0 or tx_shares <= 0:
+                    st.error("請填寫代碼、單價、股數")
+                else:
+                    # 非台幣計價時，若沒填台幣總額，嘗試自動換算
+                    final_twd = tx_twd
+                    if tx_currency != "TWD" and final_twd <= 0:
+                        fx = get_fx_rate(tx_currency, "TWD")
+                        if fx:
+                            final_twd = tx_price * tx_shares * fx
+                    add_transaction(
+                        symbol=tx_symbol,
+                        action="buy" if tx_action == "買進" else "sell",
+                        trade_date=tx_date.isoformat(),
+                        price=tx_price,
+                        shares=tx_shares,
+                        twd_amount=final_twd if final_twd > 0 else None,
+                        currency=tx_currency,
+                        note=tx_note,
+                    )
+                    st.success(f"已記錄：{tx_action} {tx_symbol} × {tx_shares}")
+                    st.rerun()
+
+    # ── 持倉總覽 ──────────────────────────────
+    holdings = get_holdings()
+    # 篩選
+    holdings_filtered = [
+        h for h in holdings
+        if _market_key is None or _classify_market(h["symbol"], h.get("currency")) == _market_key
+    ]
+    st.subheader(f"目前持倉{(' — ' + _market_key) if _market_key else ''}")
+    if not holdings_filtered:
+        if holdings:
+            st.caption(f"（{_market_key} 無持倉）")
+        else:
+            st.caption("（尚無持倉，先新增買進交易）")
+    else:
+        h_rows = []
+        total_cost = 0.0
+        total_value = 0.0
+        for h in holdings_filtered:
+            total_cost += h["twd_cost"]
+            # 抓現價計算未實現損益
+            cur_price = None
+            try:
+                tk, _ = fetch_ticker(h["symbol"])
+                if tk:
+                    info = tk.info or {}
+                    cur_price = (info.get("currentPrice") or info.get("regularMarketPrice")
+                                 or info.get("previousClose"))
+            except Exception:
+                pass
+
+            if cur_price:
+                pnl_pct = (cur_price - h["avg_cost"]) / h["avg_cost"] * 100
+                # 用現價推估現值 (台幣)
+                # 簡化：每股台幣成本 = twd_cost / shares，現值 = 每股現價 / 每股原幣成本 * 每股台幣成本
+                per_share_twd_cost = h["twd_cost"] / h["shares"] if h["shares"] else 0
+                cur_value_twd = (cur_price / h["avg_cost"]) * per_share_twd_cost * h["shares"] if h["avg_cost"] else 0
+                pnl_twd = cur_value_twd - h["twd_cost"]
+                total_value += cur_value_twd
+                pnl_str = f"{pnl_pct:+.2f}%"
+                pnl_twd_str = f"NT${pnl_twd:+,.0f}"
+            else:
+                cur_price = None
+                pnl_str = "-"
+                pnl_twd_str = "-"
+                total_value += h["twd_cost"]
+
+            h_rows.append({
+                "市場": _classify_market(h["symbol"], h.get("currency")),
+                "代碼": h["symbol"],
+                "股數": f"{h['shares']:,.2f}",
+                "平均成本": f"{h['avg_cost']:,.4f}",
+                "現價": f"{cur_price:,.4f}" if cur_price else "-",
+                "損益 %": pnl_str,
+                "未實現損益": pnl_twd_str,
+                "投入台幣": f"NT${h['twd_cost']:,.0f}",
+                "已實現": f"NT${h['twd_realized']:,.0f}",
+            })
+        st.dataframe(pd.DataFrame(h_rows), use_container_width=True, hide_index=True)
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("總成本", f"NT${total_cost:,.0f}")
+        m2.metric("估計現值", f"NT${total_value:,.0f}")
+        m3.metric("未實現損益", f"NT${total_value - total_cost:+,.0f}",
+                  f"{(total_value - total_cost) / total_cost * 100:+.2f}%" if total_cost else "0%")
+
+    st.divider()
+
+    # ── 交易日曆 ──────────────────────────────
+    st.subheader(f"交易日曆{(' — ' + _market_key) if _market_key else ''}")
+    all_tx_raw = get_transactions()
+    all_tx = [
+        t for t in all_tx_raw
+        if _market_key is None or _classify_market(t["symbol"], t.get("currency")) == _market_key
+    ]
+    if not all_tx:
+        st.caption("（無交易紀錄）" if all_tx_raw else "（尚無交易紀錄）")
+    else:
+        # 聚合每日台幣金額（買 +，賣 -）
+        from collections import defaultdict
+        daily = defaultdict(float)
+        daily_count = defaultdict(int)
+        daily_detail = defaultdict(list)
+        for t in all_tx:
+            d = t["trade_date"]
+            amt = (t.get("twd_amount") or 0) * (1 if t["action"] == "buy" else -1)
+            daily[d] += amt
+            daily_count[d] += 1
+            sign = "🟢" if t["action"] == "buy" else "🔴"
+            daily_detail[d].append(f"{sign}{t['symbol']} {t['shares']:.2f}@{t['price']:.4f}")
+
+        # 取最近 1 年
+        today = _date.today()
+        start = today - _td(days=365)
+        all_dates = [start + _td(days=i) for i in range((today - start).days + 1)]
+
+        # 排列成 week x weekday 熱圖
+        # x = ISO 週序 (連續整數，起點 0)
+        # y = 星期幾 (0=週一 ... 6=週日)
+        week0 = start.isocalendar()[1]
+        year0 = start.isocalendar()[0]
+
+        z = []          # values
+        text = []       # hover text
+        x_labels = []   # 週日期標記
+
+        # 7 列 (週一-週日) × N 欄
+        rows_z = {i: [] for i in range(7)}
+        rows_text = {i: [] for i in range(7)}
+        col_dates = []
+
+        cur = start - _td(days=start.weekday())  # 對齊到週一
+        while cur <= today:
+            col_dates.append(cur)
+            for dow in range(7):
+                d = cur + _td(days=dow)
+                key = d.isoformat()
+                val = daily.get(key, 0)
+                rows_z[dow].append(val if (start <= d <= today) else None)
+                detail = "<br>".join(daily_detail.get(key, []))
+                if detail:
+                    rows_text[dow].append(f"<b>{key}</b><br>淨額 NT${val:+,.0f}<br>{detail}")
+                else:
+                    rows_text[dow].append(f"{key}")
+            cur += _td(days=7)
+
+        z_matrix = [rows_z[i] for i in range(7)]
+        text_matrix = [rows_text[i] for i in range(7)]
+
+        # 月份標籤
+        x_tickvals = []
+        x_ticktext = []
+        last_month = None
+        for i, d in enumerate(col_dates):
+            if d.month != last_month:
+                x_tickvals.append(i)
+                x_ticktext.append(f"{d.month}月")
+                last_month = d.month
+
+        heat = go.Figure(go.Heatmap(
+            z=z_matrix,
+            text=text_matrix,
+            hovertemplate="%{text}<extra></extra>",
+            colorscale=[
+                [0.0, "#e74c3c"],   # 大額賣出
+                [0.5, "#1e1e2e"],   # 無交易
+                [1.0, "#2ecc71"],   # 大額買進
+            ],
+            zmid=0,
+            showscale=True,
+            colorbar=dict(title="淨額 NT$", thickness=10),
+            xgap=2, ygap=2,
+        ))
+        heat.update_layout(
+            height=240,
+            margin=dict(l=40, r=20, t=20, b=30),
+            xaxis=dict(
+                tickmode="array",
+                tickvals=x_tickvals,
+                ticktext=x_ticktext,
+                showgrid=False,
+            ),
+            yaxis=dict(
+                tickmode="array",
+                tickvals=list(range(7)),
+                ticktext=["一", "二", "三", "四", "五", "六", "日"],
+                autorange="reversed",
+                showgrid=False,
+            ),
+        )
+        st.plotly_chart(heat, use_container_width=True)
+        st.caption("綠 = 買進日 / 紅 = 賣出日 / 滑鼠移上去可看當日明細")
+
+    st.divider()
+
+    # ── 交易明細 ──────────────────────────────
+    st.subheader(f"交易明細{(' — ' + _market_key) if _market_key else ''}")
+    if not all_tx:
+        st.caption("（無紀錄）")
+    else:
+        f1, _ = st.columns([1, 3])
+        all_syms = sorted(set(t["symbol"] for t in all_tx))
+        filter_sym = f1.selectbox("篩選代碼", ["全部"] + all_syms)
+        shown = [t for t in all_tx if filter_sym == "全部" or t["symbol"] == filter_sym]
+
+        for t in shown[:50]:
+            cols = st.columns([0.7, 1, 0.9, 1.1, 1.1, 1.1, 1.8, 0.5])
+            _mkt = _classify_market(t["symbol"], t.get("currency"))
+            cols[0].caption("🇹🇼" if _mkt == "台股" else ("🇺🇸" if _mkt == "美股" else "🌐"))
+            cols[1].markdown(f"**{t['trade_date']}**")
+            cols[2].markdown("🟢 買" if t["action"] == "buy" else "🔴 賣")
+            cols[3].markdown(f"**{t['symbol']}**")
+            cols[4].caption(f"{t['shares']:,.2f} 股")
+            cols[5].caption(f"@{t['price']:,.4f} {t['currency']}")
+            twd_str = f"NT${t['twd_amount']:,.0f}" if t.get("twd_amount") else "-"
+            cols[6].caption(f"{twd_str}  {t.get('note') or ''}")
+            if cols[7].button("✕", key=f"del_tx_{t['id']}", help="刪除此筆"):
+                delete_transaction(t["id"])
+                st.rerun()
+        if len(shown) > 50:
+            st.caption(f"…還有 {len(shown) - 50} 筆未顯示")
+
+    st.stop()
+
+
+if not analyze_btn:
+    st.info("在左側輸入股票代碼後，點擊「開始分析」")
+
+    # Show recent history — one row per symbol (latest only)
+    hist = get_history(limit=20, unique_symbols=True)
+    if hist:
+        st.subheader("近期分析紀錄")
+        rows = []
+        for h in hist:
+            rows.append({
+                "代碼": h["symbol"],
+                "最後分析": h["analyzed_at"][:16],
+                "基本面": h["fundamental_score"],
+                "風險": h["risk_level"],
+                "估值": h["valuation_status"],
+                "建議": h["recommendation"],
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.stop()
+
+
+if not symbol_input:
+    st.warning("請輸入股票代碼")
+    st.stop()
+
+
+# ── Fetch data ────────────────────────────────
+with st.spinner(f"正在抓取 {symbol_input.upper()} 資料..."):
+    ticker, used_sym = fetch_ticker(symbol_input)
+
+if ticker is None:
+    st.error(f"找不到 {symbol_input}，請確認代碼正確（台灣股票使用數字代碼，如 0050、2330）")
+    st.stop()
+
+with st.spinner("分析中..."):
+    data = get_all_data(ticker)
+    info = data["info"]
+
+    fund_result = fundamental.calculate(data)
+    risk_result = risk.calculate(data)
+    val_result = valuation.calculate(data)
+
+    ma200_bias = val_result.get("ma200_bias")
+
+    # FX conversion: budget is always TWD; convert to stock's native currency
+    stock_currency = info.get("currency", "TWD")
+    twd_budget = float(monthly_budget)
+    fx_rate = None      # 1 TWD = ? stock_currency
+    budget_in_stock_ccy = twd_budget
+    if stock_currency not in ("TWD", ""):
+        fx_rate = get_fx_rate("TWD", stock_currency)
+        if fx_rate:
+            budget_in_stock_ccy = twd_budget * fx_rate
+
+    _regime = _cached_market_regime()
+    _mkt_mult = _regime.get("budget_multiplier", 1.0) if _regime.get("available") else 1.0
+    _mkt_label = _regime.get("regime") if _regime.get("available") else None
+
+    alloc_result = allocation.calculate(
+        monthly_budget=budget_in_stock_ccy,
+        valuation_status=val_result["status"],
+        ma200_bias=ma200_bias,
+        risk_level=risk_result["level"],
+        fundamental_score=fund_result["total_score"],
+        market_mult=_mkt_mult,
+        market_regime=_mkt_label,
+    )
+    # Attach FX info for display
+    alloc_result["twd_budget"] = twd_budget
+    alloc_result["stock_currency"] = stock_currency
+    alloc_result["fx_rate"] = fx_rate
+    alloc_result["twd_invest"] = twd_budget * alloc_result["invest_ratio"]
+    alloc_result["twd_reserve"] = twd_budget * alloc_result["cash_ratio"]
+
+    current_price = (
+        safe_float(info.get("currentPrice"))
+        or safe_float(info.get("regularMarketPrice"))
+        or safe_float(info.get("previousClose"))
+    )
+    pos_result = position.calculate(
+        fundamental_score=fund_result["total_score"],
+        risk_level=risk_result["level"],
+        valuation_status=val_result["status"],
+        ma200_bias=ma200_bias,
+        cost_basis=float(cost_basis) if cost_basis > 0 else None,
+        current_price=current_price,
+    )
+
+    # Save to DB
+    ccy_sym = "NT$" if info.get("currency") == "TWD" else ("$" if info.get("currency") == "USD" else (info.get("currency", "") + " "))
+    price_str_notify = f"{ccy_sym}{current_price:,.2f}" if current_price else "N/A"
+    full_result = {
+        "fundamental": fund_result,
+        "risk": risk_result,
+        "valuation": val_result,
+        "allocation": alloc_result,
+        "position": pos_result,
+        "current_price_str": price_str_notify,
+    }
+    save_analysis(used_sym, full_result)
+
+    # 將完整結果存到 session，給「手動發送通知」按鈕使用
+    st.session_state["_last_full_result"] = full_result
+    st.session_state["_last_symbol"] = used_sym
+
+
+# ── Stock header ───────────────────────────────
+name = info.get("longName") or info.get("shortName") or used_sym
+currency = info.get("currency", "")
+exchange = info.get("exchange", "")
+
+st.subheader(f"{name}  ({used_sym})")
+col_p1, col_p2, col_p3, col_p4 = st.columns(4)
+with col_p1:
+    st.metric("目前股價", price_str_notify)
+with col_p2:
+    st.metric("交易所", exchange or "N/A")
+with col_p3:
+    mc = safe_float(info.get("marketCap"))
+    mc_str = f"{mc/1e9:.1f}B" if mc and mc >= 1e9 else f"{mc/1e6:.0f}M" if mc else "N/A"
+    st.metric("市值", mc_str)
+with col_p4:
+    sector = info.get("sector") or info.get("category") or ("ETF" if data["is_etf"] else "N/A")
+    st.metric("產業/類型", sector)
+
+st.divider()
+
+
+# ── 快速下單 / 帳務記錄 ─────────────────────────
+_cur_price_val = current_price or 0.0
+_cur_ccy = currency or "TWD"
+_existing_hold = next((h for h in get_holdings() if h["symbol"] == used_sym), None)
+
+with st.container(border=True):
+    _qh1, _qh2, _qh3 = st.columns([2, 1, 1])
+    _qh1.markdown(f"### 📝 快速記錄  ·  {used_sym}")
+    if _existing_hold:
+        _qh2.metric("目前持股", f"{_existing_hold['shares']:,.2f}")
+        _avg = _existing_hold["avg_cost"]
+        _pnl = (_cur_price_val - _avg) / _avg * 100 if _avg else 0
+        _qh3.metric("平均成本", f"{_avg:,.4f}", f"{_pnl:+.2f}%")
+    else:
+        _qh2.caption("（尚無持倉）")
+
+    _input_mode = st.radio(
+        "輸入方式",
+        ["依股數", "依台幣金額（支援碎股）"],
+        horizontal=True,
+        key=f"q_mode_{used_sym}",
+        label_visibility="collapsed",
+    )
+
+    # 顯示上一筆成功訊息（在 rerun 後仍可看到）
+    _last_ok_key = f"_last_tx_msg_{used_sym}"
+    if st.session_state.get(_last_ok_key):
+        st.success(st.session_state.pop(_last_ok_key))
+
+    # 不使用 st.form，改用普通 widget — 每個 input 變動會自動寫入 session_state，
+    # 按下按鈕時 rerun 從 session_state 讀最新值，最可靠
+    f1, f2, f3 = st.columns([1, 1, 1.2])
+    # 把當前股價嵌入 key，市場價一變動 widget 重新初始化 → 永遠同步當前股價
+    _price_key = f"q_pr_{used_sym}_{_cur_price_val:.4f}"
+    q_price = f1.number_input(
+        f"單價 ({_cur_ccy})", min_value=0.0,
+        value=float(_cur_price_val), step=0.01, format="%.4f",
+        key=_price_key,
+    )
+
+    _fx_to_twd = None
+    if _cur_ccy != "TWD":
+        _fx_to_twd = get_fx_rate(_cur_ccy, "TWD")
+
+    if _input_mode == "依股數":
+        q_shares = f2.number_input(
+            "股數", min_value=0.0, value=0.0, step=1.0, format="%.4f",
+            key=f"q_sh_{used_sym}",
+            help="台股 1 張 = 1000 股；零股可填小數",
+        )
+        _est_twd = q_price * q_shares
+        if _fx_to_twd and q_shares > 0:
+            _est_twd = q_price * q_shares * _fx_to_twd
+        q_twd_input = f3.number_input(
+            "台幣總額（可微調含手續費）", min_value=0.0,
+            value=float(_est_twd), step=100.0, format="%.0f",
+            key=f"q_twd_{used_sym}",
+        )
+    else:
+        q_twd_input = f2.number_input(
+            "台幣金額 (NT$)", min_value=0.0, value=0.0, step=1000.0, format="%.0f",
+            key=f"q_twd_amt_{used_sym}",
+            help="輸入實際扣款金額，系統自動算股數",
+        )
+        if q_price > 0 and q_twd_input > 0:
+            if _cur_ccy == "TWD":
+                q_shares = q_twd_input / q_price
+            else:
+                fx_twd_to_native = get_fx_rate("TWD", _cur_ccy)
+                if fx_twd_to_native:
+                    native_amount = q_twd_input * fx_twd_to_native
+                    q_shares = native_amount / q_price
+                else:
+                    q_shares = 0
+        else:
+            q_shares = 0
+        f3.text_input(
+            "自動算出股數",
+            value=f"{q_shares:,.4f} 股" if q_shares > 0 else "—",
+            disabled=True,
+            key=f"q_sh_calc_{used_sym}",
+        )
+
+    q_note = st.text_input(
+        "備註（選填）", placeholder="如：第3次補倉 / 定期定額 / 碎股",
+        key=f"q_note_{used_sym}",
+    )
+
+    b1, b2 = st.columns(2)
+    buy_clicked = b1.button(
+        "🟢  記錄買進", type="primary",
+        use_container_width=True, key=f"q_buy_{used_sym}",
+    )
+    sell_clicked = b2.button(
+        "🔴  記錄賣出",
+        use_container_width=True, key=f"q_sell_{used_sym}",
+    )
+
+    if buy_clicked or sell_clicked:
+        if q_price <= 0:
+            st.error("請填入單價")
+        elif q_shares <= 0:
+            if _input_mode == "依股數":
+                st.error("請填入股數")
+            else:
+                st.error("請填入台幣金額（且匯率須可取得）")
+        else:
+            from datetime import date as _date_today
+            try:
+                add_transaction(
+                    symbol=used_sym,
+                    action="buy" if buy_clicked else "sell",
+                    trade_date=_date_today.today().isoformat(),
+                    price=float(q_price),
+                    shares=float(q_shares),
+                    twd_amount=float(q_twd_input) if q_twd_input > 0 else None,
+                    currency=_cur_ccy,
+                    note=q_note or "",
+                )
+                _msg = (
+                    f"已記錄：{'買進' if buy_clicked else '賣出'} {used_sym} × {q_shares:,.4f} @ "
+                    f"{q_price:,.4f} {_cur_ccy}  ·  NT${q_twd_input:,.0f}  → 已同步到帳務"
+                )
+                # 把訊息存進 session_state，下次 render 時顯示（避免 rerun 立即清掉）
+                st.session_state[_last_ok_key] = _msg
+                # 清空所有 input；單價 key 含股價後綴，用 prefix 比對
+                _fixed = {f"q_sh_{used_sym}", f"q_twd_{used_sym}",
+                          f"q_twd_amt_{used_sym}", f"q_note_{used_sym}"}
+                for _k in list(st.session_state.keys()):
+                    if _k in _fixed or _k.startswith(f"q_pr_{used_sym}_"):
+                        del st.session_state[_k]
+                st.rerun()
+            except Exception as e:
+                st.error(f"寫入失敗：{e}")
+
+
+st.divider()
+
+
+# ── Summary cards ──────────────────────────────
+c1, c2, c3, c4 = st.columns(4)
+
+_grade_color = {"green": "#2ecc71", "blue": "#3498db", "orange": "#f39c12", "red": "#e74c3c"}
+
+with c1:
+    st.plotly_chart(score_gauge(fund_result["total_score"], "基本面評分"), use_container_width=True)
+    _col = _grade_color.get(fund_result["color"], "white")
+    st.markdown(f"<div style='text-align:center;color:{_col};font-weight:600;margin-top:-12px'>{fund_result['grade']}</div>", unsafe_allow_html=True)
+
+with c2:
+    risk_score = 100 - risk_result["risk_score"]
+    st.plotly_chart(score_gauge(risk_score, "穩定性評分"), use_container_width=True)
+    _col = _grade_color.get(risk_result["color"], "white")
+    st.markdown(f"<div style='text-align:center;color:{_col};font-weight:600;margin-top:-12px'>{risk_result['level']}</div>", unsafe_allow_html=True)
+
+with c3:
+    st.plotly_chart(score_gauge(val_result["valuation_score"], "估值合理度"), use_container_width=True)
+    _col = _grade_color.get(val_result["color"], "white")
+    _label = f"{val_result['status']} — {val_result['suggestion']}"
+    st.markdown(f"<div style='text-align:center;color:{_col};font-weight:600;margin-top:-12px;font-size:0.85rem'>{_label}</div>", unsafe_allow_html=True)
+
+with c4:
+    action = pos_result["action"]
+    action_color = pos_result["action_color"]
+    st.markdown(f"""
+    <div style='text-align:center; padding:30px 0'>
+        <div style='font-size:1.1rem; color:#aaa;'>建議操作</div>
+        <div style='font-size:2.5rem; font-weight:700; color:{action_color};'>{action}</div>
+        <div style='font-size:0.9rem; margin-top:8px;'>{pos_result['strategy']}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+st.divider()
+
+
+# ── Tabs ───────────────────────────────────────
+tab_chart, tab_a, tab_b, tab_c, tab_d, tab_e = st.tabs([
+    "價格走勢", "A 基本面", "B 風險", "C 估值", "D 資金配置", "E 建倉策略"
+])
+
+
+# Tab: Price chart
+with tab_chart:
+    fig = price_chart(data["history"], used_sym)
+    st.plotly_chart(fig, use_container_width=True)
+    if ma200_bias is not None:
+        bias_color = "green" if ma200_bias < -15 else "red" if ma200_bias > 15 else "blue"
+        st.metric(
+            "MA200 乖離率",
+            f"{ma200_bias:+.2f}%",
+            help="(股價 - MA200) / MA200 × 100%",
+        )
+
+
+# Tab A: Fundamental
+with tab_a:
+    st.subheader(f"基本面評分：{fund_result['total_score']:.1f} / 100 — {fund_result['grade']}")
+
+    if fund_result.get("is_etf"):
+        st.info(f"ETF評估：{fund_result.get('etf_summary', '')}")
+    else:
+        st.plotly_chart(fundamental_bar(fund_result["details"]), use_container_width=True)
+
+        rows = []
+        for k, (score, max_s, desc) in fund_result["details"].items():
+            rows.append({"指標": k, "得分": score, "滿分": max_s, "說明": desc})
+        df = pd.DataFrame(rows)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+# Tab B: Risk
+with tab_b:
+    st.subheader(f"風險等級：{risk_result['level']} — {risk_result['description']}")
+
+    rows = []
+    for k, v in risk_result["metrics"].items():
+        rows.append({"指標": k, "數值": v["value"], "風險分數": v["risk_pts"], "說明": v["note"]})
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+# Tab C: Valuation
+with tab_c:
+    st.subheader(f"估值狀態：{val_result['status']} — {val_result['suggestion']}")
+
+    rows = []
+    for k, v in val_result["metrics"].items():
+        rows.append({"指標": k, "數值": v["value"], "合理度得分": v["score_pts"], "說明": v["note"]})
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    if ma200_bias is not None:
+        st.info(f"均線乖離率公式：(股價 − MA200) / MA200 × 100% = **{ma200_bias:+.2f}%**")
+
+
+# Tab D: Allocation
+with tab_d:
+    st.subheader("本月資金配置建議")
+
+    _ccy = alloc_result["stock_currency"]
+    _fx = alloc_result.get("fx_rate")
+    _is_foreign = _fx is not None and _ccy not in ("TWD", "")
+
+    # FX info banner
+    if _is_foreign and _fx:
+        st.info(
+            f"預算以新台幣輸入，依即時匯率換算：**1 TWD = {_fx:.5f} {_ccy}**　"
+            f"（NT${alloc_result['twd_budget']:,.0f} ≈ {_ccy} {alloc_result['monthly_budget']:,.2f}）"
+        )
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        primary = f"NT${alloc_result['twd_invest']:,.0f}"
+        secondary = f"{_ccy} {alloc_result['invest_amount']:,.2f}" if _is_foreign else ""
+        st.metric("本月投入", primary, f"{alloc_result['invest_ratio']*100:.0f}%")
+        if secondary:
+            st.caption(f"≈ {secondary}")
+    with col2:
+        primary = f"NT${alloc_result['twd_reserve']:,.0f}"
+        secondary = f"{_ccy} {alloc_result['cash_reserve']:,.2f}" if _is_foreign else ""
+        st.metric("保留現金", primary, f"{alloc_result['cash_ratio']*100:.0f}%")
+        if secondary:
+            st.caption(f"≈ {secondary}")
+    with col3:
+        st.metric("月總預算", f"NT${alloc_result['twd_budget']:,.0f}")
+
+    col_chart, col_info = st.columns([1, 2])
+    with col_chart:
+        st.plotly_chart(allocation_pie(alloc_result["invest_ratio"], alloc_result["cash_ratio"]), use_container_width=True)
+    with col_info:
+        st.markdown(f"**投入時機：** {alloc_result['schedule']}")
+        if alloc_result["extra_buy"]:
+            st.warning("MA200乖離超過 -20%：建議額外補倉機會")
+        st.markdown("**決策依據：**")
+        for r in alloc_result["rationale"]:
+            st.markdown(f"- {r}")
+        st.caption("📌 MA200（200日移動平均線）：將過去200個交易日的收盤價平均，反映股票長期趨勢。股價高於MA200代表多頭趨勢，乖離率越大表示漲幅越過熱；低於MA200則可能是低估買點。")
+
+
+# Tab E: Position
+with tab_e:
+    st.subheader(f"建倉策略：{pos_result['action']}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"**策略說明：** {pos_result['strategy']}")
+        st.markdown(f"**分批建議：** {pos_result['batch_suggestion']}")
+        st.markdown(f"**最大倉位：** 不超過總資產 {pos_result['max_position_pct']}")
+
+    with col2:
+        _topic_for_send = get_topic()
+        if pos_result["add_triggered"]:
+            st.success("補倉訊號觸發")
+            if _topic_for_send:
+                if st.button("🔔 發送補倉通知", key="send_add_notify", use_container_width=True):
+                    _title, _body = build_message(used_sym, "add", full_result)
+                    _ok, _detail = send(_body, _topic_for_send, title=_title, tags="bell")
+                    if _ok:
+                        st.toast("補倉通知已送出 🔔", icon="✅")
+                    else:
+                        st.error(f"發送失敗：{_detail}")
+            else:
+                st.caption("（未設定 ntfy 主題）")
+        if pos_result["reduce_triggered"]:
+            st.warning("減碼訊號觸發")
+            if _topic_for_send:
+                if st.button("⚠️ 發送減碼通知", key="send_reduce_notify", use_container_width=True):
+                    _title, _body = build_message(used_sym, "reduce", full_result)
+                    _ok, _detail = send(_body, _topic_for_send, title=_title,
+                                        priority="high", tags="warning")
+                    if _ok:
+                        st.toast("減碼通知已送出 ⚠️", icon="✅")
+                    else:
+                        st.error(f"發送失敗：{_detail}")
+            else:
+                st.caption("（未設定 ntfy 主題）")
+
+    if pos_result["rules"]:
+        st.markdown("**觸發規則：**")
+        for r in pos_result["rules"]:
+            st.markdown(f"- {r}")
+
+    # Reference table
+    st.divider()
+    st.markdown("**補倉/減倉條件參考**")
+    ref_data = {
+        "情境": ["持倉下跌 -10%（基本面未惡化）", "持倉下跌 -20%+", "估值過熱", "基本面惡化", "MA200乖離 > +20%"],
+        "操作": ["啟動補倉", "強力補倉", "分批減碼 20%", "停止加碼，考慮出清", "暫停加碼"],
+    }
+    st.dataframe(pd.DataFrame(ref_data), use_container_width=True, hide_index=True)
+
+st.divider()
+st.caption(f"分析時間：{datetime.now().strftime('%Y-%m-%d %H:%M')}　資料來源：Yahoo Finance　本工具僅供參考，不構成投資建議。")

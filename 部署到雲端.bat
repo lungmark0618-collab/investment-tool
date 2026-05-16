@@ -3,11 +3,14 @@ cd /d "%~dp0"
 echo.
 echo === Deploy to Streamlit Cloud ===
 echo.
+set /p MSG="Commit message (press Enter for default): "
+if "%MSG%"=="" set MSG=Update from local
+echo.
 echo [1/3] git add ...
 git add .
 echo.
 echo [2/3] git commit ...
-git commit -m "Support Postgres via DATABASE_URL and ntfy via Streamlit secrets"
+git commit -m "%MSG%"
 echo.
 echo [3/3] git push ...
 git push

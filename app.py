@@ -1,6 +1,9 @@
 """長期投資決策工具 — Streamlit App"""
+import platform
 import sys
 from pathlib import Path
+
+IS_WINDOWS = platform.system() == "Windows"
 
 # Ensure local modules are importable when running `streamlit run app.py`
 sys.path.insert(0, str(Path(__file__).parent))
@@ -460,76 +463,79 @@ with st.sidebar:
 
     st.divider()
 
-    # ── 自動掃描設定 ─────────────────────────────
-    st.subheader("自動掃描排程")
-    st.caption("Windows 工作排程器每日定時掃描自選清單，觸發訊號自動推播")
+    # ── 自動掃描設定（僅本機 Windows 可用） ──────────
+    if IS_WINDOWS:
+        st.subheader("自動掃描排程")
+        st.caption("Windows 工作排程器每日定時掃描自選清單，觸發訊號自動推播")
 
-    _saved_times = get_scan_times()
-    _scan_count = st.number_input(
-        "每日掃描次數",
-        min_value=1,
-        max_value=6,
-        value=len(_saved_times) if 1 <= len(_saved_times) <= 6 else 3,
-        step=1,
-    )
-
-    _time_inputs = []
-    _defaults = (_saved_times + ["09:00", "13:30", "21:30", "07:00", "12:00", "18:00"])[:_scan_count]
-    for i in range(_scan_count):
-        try:
-            hh, mm = _defaults[i].split(":")
-            from datetime import time as _t
-            _default_time = _t(int(hh), int(mm))
-        except Exception:
-            _default_time = None
-        t = st.time_input(
-            f"第 {i+1} 次掃描時間",
-            value=_default_time,
-            key=f"scan_time_{i}",
-            step=300,
+        _saved_times = get_scan_times()
+        _scan_count = st.number_input(
+            "每日掃描次數",
+            min_value=1,
+            max_value=6,
+            value=len(_saved_times) if 1 <= len(_saved_times) <= 6 else 3,
+            step=1,
         )
-        _time_inputs.append(t.strftime("%H:%M"))
 
-    _dedup = st.slider(
-        "同訊號去重時間（小時）",
-        min_value=1, max_value=168, value=get_dedup_hours(), step=1,
-        help="同一檔股票同一訊號在此時間內只通知一次",
-    )
+        _time_inputs = []
+        _defaults = (_saved_times + ["09:00", "13:30", "21:30", "07:00", "12:00", "18:00"])[:_scan_count]
+        for i in range(_scan_count):
+            try:
+                hh, mm = _defaults[i].split(":")
+                from datetime import time as _t
+                _default_time = _t(int(hh), int(mm))
+            except Exception:
+                _default_time = None
+            t = st.time_input(
+                f"第 {i+1} 次掃描時間",
+                value=_default_time,
+                key=f"scan_time_{i}",
+                step=300,
+            )
+            _time_inputs.append(t.strftime("%H:%M"))
 
-    _sig = get_signal_filter()
-    _col_a, _col_b = st.columns(2)
-    _sig_add = _col_a.checkbox("補倉訊號", value=_sig["add"])
-    _sig_red = _col_b.checkbox("減碼訊號", value=_sig["reduce"])
+        _dedup = st.slider(
+            "同訊號去重時間（小時）",
+            min_value=1, max_value=168, value=get_dedup_hours(), step=1,
+            help="同一檔股票同一訊號在此時間內只通知一次",
+        )
 
-    if st.button("儲存並安裝排程", type="primary", use_container_width=True):
-        set_scan_times(_time_inputs)
-        set_dedup_hours(_dedup)
-        set_signal_filter(_sig_add, _sig_red)
-        ok, msg = scheduler.install_tasks(_time_inputs)
-        if ok:
-            st.success(f"✅ {msg}")
-        else:
-            st.error(msg)
+        _sig = get_signal_filter()
+        _col_a, _col_b = st.columns(2)
+        _sig_add = _col_a.checkbox("補倉訊號", value=_sig["add"])
+        _sig_red = _col_b.checkbox("減碼訊號", value=_sig["reduce"])
 
-    _existing = scheduler.list_tasks()
-    if _existing:
-        with st.expander(f"目前已安裝 {len(_existing)} 個排程"):
-            for t in _existing:
-                st.code(t, language=None)
-            if st.button("移除全部排程", use_container_width=True):
-                ok, msg = scheduler.uninstall_all()
-                st.success(msg) if ok else st.error(msg)
-                st.rerun()
+        if st.button("儲存並安裝排程", type="primary", use_container_width=True):
+            set_scan_times(_time_inputs)
+            set_dedup_hours(_dedup)
+            set_signal_filter(_sig_add, _sig_red)
+            ok, msg = scheduler.install_tasks(_time_inputs)
+            if ok:
+                st.success(f"✅ {msg}")
+            else:
+                st.error(msg)
 
-    if st.button("立即掃描一次（測試）", use_container_width=True):
-        with st.spinner("掃描中..."):
-            ok, output = scheduler.run_now()
-        if ok:
-            st.success("掃描完成，詳見 data/scan.log")
-        else:
-            st.error("掃描失敗")
-        with st.expander("執行輸出"):
-            st.code(output or "(無輸出)", language=None)
+        _existing = scheduler.list_tasks()
+        if _existing:
+            with st.expander(f"目前已安裝 {len(_existing)} 個排程"):
+                for t in _existing:
+                    st.code(t, language=None)
+                if st.button("移除全部排程", use_container_width=True):
+                    ok, msg = scheduler.uninstall_all()
+                    st.success(msg) if ok else st.error(msg)
+                    st.rerun()
+
+        if st.button("立即掃描一次（測試）", use_container_width=True):
+            with st.spinner("掃描中..."):
+                ok, output = scheduler.run_now()
+            if ok:
+                st.success("掃描完成，詳見 data/scan.log")
+            else:
+                st.error("掃描失敗")
+            with st.expander("執行輸出"):
+                st.code(output or "(無輸出)", language=None)
+    else:
+        st.caption("（自動掃描排程僅在本機 Windows 版本可用,雲端版本請改用其他排程服務）")
 
 
 # ─────────────────────────────────────────────

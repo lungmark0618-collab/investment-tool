@@ -1,4 +1,13 @@
-"""股票名稱搜尋 — 支援英文名 / 代碼 / 部分台股中文名稱對應"""
+"""股票名稱搜尋 — 支援英文名 / 代碼 / 部分台股中文名稱對應
+
+排序策略:
+  1. 完全相符的 ticker (AAPL = AAPL) → 100 分
+  2. 開頭相符 (AAPL → AAPLW) → 50 分
+  3. 包含 query (AAPL 在 AAPL.MX 內) → 25 分
+  4. 名稱包含 query (AAPL 在 "Apple Inc" 內) → 10 分
+
+這樣輸入 AAPL 時,真正的 AAPL 會排在 AAPU/AAPB 等槓桿 ETF 前面。
+"""
 from typing import List, Dict
 import yfinance as yf
 
@@ -25,47 +34,81 @@ TW_NAME_ALIAS = {
 }
 
 
+def _score(symbol: str, name: str, q_upper: str, q_lower: str) -> int:
+    """排序分數,越高越靠前。"""
+    sym_upper = symbol.upper()
+    sym_base = sym_upper.split(".")[0]  # AAPL.TW → AAPL
+    name_lower = (name or "").lower()
+
+    # 完全相符優先(同時考慮帶/不帶後綴的形式)
+    if sym_base == q_upper or sym_upper == q_upper:
+        return 100
+    # 加上 .TW 也算完全相符 (2330 ↔ 2330.TW)
+    if sym_upper == f"{q_upper}.TW" or sym_upper == f"{q_upper}.TWO":
+        return 100
+    # 開頭相符
+    if sym_base.startswith(q_upper):
+        return 50
+    # 包含於代碼
+    if q_upper in sym_base:
+        return 25
+    # 包含於名稱
+    if q_lower and q_lower in name_lower:
+        return 10
+    return 0
+
+
 def search_stocks(query: str, limit: int = 8) -> List[Dict[str, str]]:
     """
-    搜尋股票，回傳：[{symbol, name, exchange}, ...]
-    支援：英文名、ticker 代碼、純數字（自動補 .TW）、部分中文公司名
+    搜尋股票,回傳:[{symbol, name, exchange}, ...]
+    支援:英文名、ticker 代碼、純數字(自動補 .TW)、部分中文公司名
     """
     q = query.strip()
     if not q:
         return []
 
-    results: List[Dict[str, str]] = []
+    q_upper = q.upper()
+    q_lower = q.lower()
     seen = set()
+    candidates: List[Dict[str, str]] = []
 
     def add(sym: str, name: str, exch: str = ""):
-        if sym and sym not in seen:
-            seen.add(sym)
-            results.append({"symbol": sym, "name": name or sym, "exchange": exch})
+        if sym and sym.upper() not in seen:
+            seen.add(sym.upper())
+            candidates.append({"symbol": sym, "name": name or sym, "exchange": exch})
 
-    # 1) 台股中文名/別名 fallback（先查，命中時直接放最前面）
-    q_low = q.lower().strip()
+    # 1) 台股中文名/別名 fallback
     for alias, sym in TW_NAME_ALIAS.items():
-        if alias.lower() == q_low or q_low in alias.lower():
+        if alias.lower() == q_lower or q_lower in alias.lower():
             add(sym, alias, "TAI")
 
-    # 2) yfinance Search（英文 / 代碼）
+    # 2) yfinance Search(英文 / 代碼) — 多抓一些,後面排序篩
     try:
-        s = yf.Search(q, max_results=limit * 2)
-        for quote in s.quotes[:limit * 2]:
+        s = yf.Search(q, max_results=limit * 3)
+        for quote in s.quotes[: limit * 3]:
             sym = quote.get("symbol", "")
             name = quote.get("shortname") or quote.get("longname") or sym
             exch = quote.get("exchange", "")
             if sym:
                 add(sym, name, exch)
-            if len(results) >= limit:
-                break
     except Exception:
         pass
 
-    # 3) 若輸入是純數字 → 補一個 .TW 推測
+    # 3) 純數字 → 補 .TW 推測(可能 yfinance 沒給,但用戶想看)
     if q.isdigit() and 4 <= len(q) <= 6:
         sym = f"{q}.TW"
-        if sym not in seen:
+        if sym.upper() not in seen:
             add(sym, f"台股 {q}", "TAI")
 
-    return results[:limit]
+    # 4) 英數字 query → 也補一個 raw ticker 推測,確保 AAPL 一定會出現
+    if q_upper.isalpha() and 1 <= len(q_upper) <= 5 and q_upper not in seen:
+        # 直接加入推測項;yfinance 可能已經有了但有可能漏掉
+        add(q_upper, q_upper, "")
+
+    # 5) 排序:完全相符 > 開頭相符 > 包含 > 名稱包含
+    candidates.sort(
+        key=lambda r: _score(r["symbol"], r["name"], q_upper, q_lower),
+        reverse=True,
+    )
+
+    return candidates[:limit]

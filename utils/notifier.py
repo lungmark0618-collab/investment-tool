@@ -22,7 +22,26 @@ def save_config(cfg: dict):
     CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _from_secrets(key: str) -> Optional[str]:
+    """讀取 Streamlit Secrets,雲端 (ntfy.topic / ntfy.server) 優先。
+    跑在 scan_watchlist.py 等非 Streamlit context 時會回 None。"""
+    try:
+        import streamlit as st  # noqa: WPS433
+        ntfy = st.secrets.get("ntfy", {})
+        val = ntfy.get(key) if isinstance(ntfy, dict) else getattr(ntfy, key, None)
+        if val:
+            return str(val).strip() or None
+    except Exception:
+        pass
+    return None
+
+
 def get_topic() -> Optional[str]:
+    # 1) Streamlit Secrets (雲端永久設定)
+    s = _from_secrets("topic")
+    if s:
+        return s
+    # 2) Local config.json
     return (load_config().get("ntfy_topic", "") or "").strip() or None
 
 
@@ -33,6 +52,9 @@ def set_topic(topic: str):
 
 
 def get_server() -> str:
+    s = _from_secrets("server")
+    if s:
+        return s
     return (load_config().get("ntfy_server", "") or "").strip() or DEFAULT_SERVER
 
 

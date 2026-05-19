@@ -2,9 +2,9 @@ name: Daily Watchlist Scan
 
 on:
   schedule:
-    - cron: '0 1 * * *'    # 09:00 TPE
-    - cron: '30 5 * * *'   # 13:30 TPE
-    - cron: '30 13 * * *'  # 21:30 TPE
+    - cron: '0 1 * * *'
+    - cron: '30 5 * * *'
+    - cron: '30 13 * * *'
   workflow_dispatch:
 
 jobs:

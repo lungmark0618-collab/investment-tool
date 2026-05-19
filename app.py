@@ -1035,8 +1035,16 @@ if mode == "帳務":
             st.caption("（沒有符合的紀錄）")
         else:
             # 準備 dataframe 給 data_editor
+            # 非 TWD 的列：把 twd_amount 反換算回原幣金額方便編輯
             df_rows = []
             for t in shown:
+                ccy = t.get("currency") or "TWD"
+                twd_amt = float(t.get("twd_amount") or 0)
+                if ccy != "TWD" and twd_amt > 0:
+                    fx_twd_to_native = get_fx_rate("TWD", ccy)
+                    native_amt = twd_amt * fx_twd_to_native if fx_twd_to_native else twd_amt
+                else:
+                    native_amt = twd_amt
                 df_rows.append({
                     "id": t["id"],
                     "刪除": False,
@@ -1045,8 +1053,8 @@ if mode == "帳務":
                     "代碼": t["symbol"],
                     "股數": float(t["shares"]),
                     "單價(原幣)": float(t["price"]),
-                    "幣別": t.get("currency") or "TWD",
-                    "台幣總額": float(t.get("twd_amount") or 0),
+                    "幣別": ccy,
+                    "金額(原幣)": float(native_amt),
                     "備註": t.get("note") or "",
                 })
             edit_df = pd.DataFrame(df_rows)
@@ -1071,11 +1079,14 @@ if mode == "帳務":
                     "幣別": st.column_config.SelectboxColumn(
                         "幣別", options=["TWD", "USD", "HKD", "JPY", "EUR"],
                     ),
-                    "台幣總額": st.column_config.NumberColumn("台幣總額", format="%.0f", step=100),
+                    "金額(原幣)": st.column_config.NumberColumn(
+                        "金額(原幣)", format="%.2f", step=1,
+                        help="輸入該幣別的實際金額（含手續費）。儲存時自動換算成台幣存進帳本",
+                    ),
                     "備註": st.column_config.TextColumn("備註"),
                 },
                 column_order=["刪除", "日期", "動作", "代碼", "股數",
-                              "幣別", "台幣總額", "備註", "id"],
+                              "幣別", "金額(原幣)", "備註", "id"],
             )
 
             # 比對差異並儲存
@@ -1087,6 +1098,15 @@ if mode == "帳務":
                     new_row = edit_lookup.get(int(orig["id"]))
                     if new_row is None:
                         continue
+                    # 金額換算：非 TWD → 用即時匯率算成台幣存
+                    new_ccy = str(new_row["幣別"])
+                    new_native = float(new_row["金額(原幣)"])
+                    if new_ccy != "TWD" and new_native > 0:
+                        _fx = get_fx_rate(new_ccy, "TWD")
+                        new_twd = new_native * _fx if _fx else new_native
+                    else:
+                        new_twd = new_native
+
                     diff = {}
                     field_map = {
                         "trade_date": str(new_row["日期"]),
@@ -1094,8 +1114,8 @@ if mode == "帳務":
                         "symbol": str(new_row["代碼"]).upper(),
                         "shares": float(new_row["股數"]),
                         "price": float(new_row["單價(原幣)"]),
-                        "currency": str(new_row["幣別"]),
-                        "twd_amount": float(new_row["台幣總額"]),
+                        "currency": new_ccy,
+                        "twd_amount": new_twd,
                         "note": str(new_row["備註"]),
                     }
                     orig_map = {

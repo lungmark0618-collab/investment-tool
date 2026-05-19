@@ -932,7 +932,7 @@ if mode == "帳務":
             daily[d] += amt
             daily_count[d] += 1
             sign = "🟢" if t["action"] == "buy" else "🔴"
-            daily_detail[d].append(f"{sign}{t['symbol']} {t['shares']:.2f}@{t['price']:.4f}")
+            daily_detail[d].append(f"{sign}{t['symbol']} {t['shares']:.2f}股 單價{t['price']:.4f}")
 
         # 取最近 1 年
         today = _date.today()
@@ -1036,7 +1036,7 @@ if mode == "帳務":
             cols[2].markdown("🟢 買" if t["action"] == "buy" else "🔴 賣")
             cols[3].markdown(f"**{t['symbol']}**")
             cols[4].caption(f"{t['shares']:,.2f} 股")
-            cols[5].caption(f"@{t['price']:,.4f} {t['currency']}")
+            cols[5].caption(f"單價 {t['price']:,.4f} {t['currency']}")
             twd_str = f"NT${t['twd_amount']:,.0f}" if t.get("twd_amount") else "-"
             cols[6].caption(f"{twd_str}  {t.get('note') or ''}")
             if cols[7].button("✕", key=f"del_tx_{t['id']}", help="刪除此筆"):

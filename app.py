@@ -660,17 +660,25 @@ if mode == "多標配置":
             st.plotly_chart(pie, use_container_width=True)
 
         with col_tbl:
+            # 從帳務拉持倉，比對每個配置標的
+            _holdings_map = {h["symbol"]: h for h in get_holdings()}
             rows = []
             for a in allocs:
+                _h = _holdings_map.get(a["symbol"])
+                _hold_cost_twd = _h["twd_cost"] if _h else 0
+                _to_invest = max(0, a["amount"] - _hold_cost_twd)
                 rows.append({
                     "代碼": a["symbol"],
-                    "權重": f"{a['weight']*100:.1f}%",
-                    "投入 (NT$)": f"{a['amount']:,.0f}",
+                    "目標權重": f"{a['weight']*100:.1f}%",
+                    "目標金額": f"NT${a['amount']:,.0f}",
+                    "目前持倉": f"NT${_hold_cost_twd:,.0f}" if _h else "—",
+                    "需追加": f"NT${_to_invest:,.0f}" if _h else f"NT${a['amount']:,.0f}",
                     "基本面": f"{a['fundamental_score']:.0f}",
                     "風險": a.get("risk_level") or "-",
                     "估值": a.get("valuation_status") or "-",
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.caption("💡「需追加」= 目標金額 − 目前持倉，告訴你還要買多少才達到配置比例")
 
         st.divider()
         st.subheader("配置理由")
@@ -1318,12 +1326,26 @@ with st.spinner("分析中..."):
         or safe_float(info.get("regularMarketPrice"))
         or safe_float(info.get("previousClose"))
     )
+
+    # 自動從帳務帶入持倉資料（如果有的話）
+    _auto_hold = next((h for h in get_holdings() if h["symbol"] == used_sym), None)
+    if cost_basis > 0:
+        # 使用者手動輸入優先
+        _effective_cost = float(cost_basis)
+        _cost_source = "手動輸入"
+    elif _auto_hold:
+        _effective_cost = float(_auto_hold["avg_cost"])
+        _cost_source = "帳務"
+    else:
+        _effective_cost = None
+        _cost_source = None
+
     pos_result = position.calculate(
         fundamental_score=fund_result["total_score"],
         risk_level=risk_result["level"],
         valuation_status=val_result["status"],
         ma200_bias=ma200_bias,
-        cost_basis=float(cost_basis) if cost_basis > 0 else None,
+        cost_basis=_effective_cost,
         current_price=current_price,
     )
 
@@ -1363,6 +1385,19 @@ with col_p3:
 with col_p4:
     sector = info.get("sector") or info.get("category") or ("ETF" if data["is_etf"] else "N/A")
     st.metric("產業/類型", sector)
+
+# ── 帳務持倉自動帶入提示 ─────────────────────────
+if _auto_hold and cost_basis <= 0:
+    _pnl_pct_hint = ((current_price - _auto_hold["avg_cost"]) / _auto_hold["avg_cost"] * 100) if current_price and _auto_hold["avg_cost"] else 0
+    _pnl_color_hint = "🟢" if _pnl_pct_hint < 0 else "🔴" if _pnl_pct_hint > 0 else "⚪"
+    st.info(
+        f"📒 **已從帳務帶入持倉**：{_auto_hold['shares']:.4f} 股 · "
+        f"成交均價 {_auto_hold['avg_cost']:.4f} {_auto_hold.get('currency', '')} · "
+        f"{_pnl_color_hint} 損益 {_pnl_pct_hint:+.2f}%  ｜  "
+        f"建倉策略已套用此成本判斷補倉/減碼訊號"
+    )
+elif cost_basis > 0:
+    st.info(f"📌 使用手動輸入成本 {cost_basis:.4f} 進行分析（如要用帳務持倉，請把側邊「平均持有成本」清成 0）")
 
 st.divider()
 

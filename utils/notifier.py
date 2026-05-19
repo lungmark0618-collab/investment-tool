@@ -1,5 +1,6 @@
 """ntfy.sh push notification integration."""
 import json
+import os
 from pathlib import Path
 from typing import Optional
 import urllib.request
@@ -41,7 +42,11 @@ def get_topic() -> Optional[str]:
     s = _from_secrets("topic")
     if s:
         return s
-    # 2) Local config.json
+    # 2) 環境變數 (GitHub Actions / 一般 server 環境)
+    env_topic = os.environ.get("NTFY_TOPIC", "").strip()
+    if env_topic:
+        return env_topic
+    # 3) Local config.json
     return (load_config().get("ntfy_topic", "") or "").strip() or None
 
 

@@ -1410,15 +1410,23 @@ _cur_ccy = currency or "TWD"
 _existing_hold = next((h for h in get_holdings() if h["symbol"] == used_sym), None)
 
 with st.container(border=True):
-    _qh1, _qh2, _qh3 = st.columns([2, 1, 1])
-    _qh1.markdown(f"### 📝 快速記錄  ·  {used_sym}")
+    st.markdown(f"### 📝 快速記錄  ·  {used_sym}")
+    # 目前持倉用小字 caption 顯示（避免跟成交單價混淆）
     if _existing_hold:
-        _qh2.metric("目前持股", f"{_existing_hold['shares']:,.2f}")
         _avg = _existing_hold["avg_cost"]
         _pnl = (_cur_price_val - _avg) / _avg * 100 if _avg else 0
-        _qh3.metric("平均成本", f"{_avg:,.4f}", f"{_pnl:+.2f}%")
+        _pnl_color = "#e74c3c" if _pnl > 0 else ("#2ecc71" if _pnl < 0 else "#95a5a6")
+        st.markdown(
+            f"<div style='color:#95a5a6;font-size:0.85rem;margin-top:-8px;margin-bottom:8px'>"
+            f"目前持倉 <b>{_existing_hold['shares']:.4f}</b> 股 · "
+            f"平均成本 <b>{_avg:,.4f}</b> · "
+            f"<span style='color:{_pnl_color}'>{_pnl:+.2f}%</span>"
+            f"  <span style='opacity:0.7'>（僅供參考，本筆下單會用下方成交單價）</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
     else:
-        _qh2.caption("（尚無持倉）")
+        st.caption("（尚無持倉）")
 
     _input_mode = st.radio(
         "輸入方式",
@@ -1437,7 +1445,13 @@ with st.container(border=True):
     # 按下按鈕時 rerun 從 session_state 讀最新值，最可靠
     f1, f2, f3 = st.columns([1, 1, 1.2])
     # 單價鎖定 = 當前市價，不允許手改（避免拍腦袋輸錯）。需改用歷史價請到「📒 帳務」
-    f1.metric(f"成交單價 ({_cur_ccy})", f"{_cur_price_val:,.4f}")
+    with f1:
+        st.markdown(
+            f"<div style='color:#95a5a6;font-size:0.85rem'>本筆成交單價 ({_cur_ccy})</div>"
+            f"<div style='font-size:1.6rem;font-weight:700;color:#3498db'>"
+            f"🔒 {_cur_price_val:,.4f}</div>",
+            unsafe_allow_html=True,
+        )
     q_price = float(_cur_price_val)
 
     _fx_to_twd = None

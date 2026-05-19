@@ -722,48 +722,127 @@ if mode == "帳務":
 
     # ── 新增交易 form ─────────────────────────
     with st.expander("➕ 新增交易", expanded=False):
-        with st.form("add_tx", clear_on_submit=True):
-            c1, c2, c3 = st.columns([1, 1, 1])
-            tx_symbol = c1.text_input("股票代碼", placeholder="例：2330 / TSLA").strip().upper()
-            tx_action = c2.selectbox("買賣", ["買進", "賣出"])
-            tx_date = c3.date_input("交易日期", value=_date.today())
+        # 股票代碼 + 智能搜尋（必須放在 form 外，搜尋結果按鈕才能 click 寫入 state）
+        # 用 prefill 中間鍵避免「widget 渲染後改 session_state」的錯
+        if "tx_symbol_pick" not in st.session_state:
+            st.session_state["tx_symbol_pick"] = ""
+        if "tx_symbol_prefill" in st.session_state:
+            st.session_state["tx_symbol_pick"] = st.session_state.pop("tx_symbol_prefill")
 
-            c4, c5, c6 = st.columns([1, 1, 1])
-            tx_price = c4.number_input("成交單價（原幣）", min_value=0.0, value=0.0, step=0.01, format="%.4f")
-            tx_shares = c5.number_input("股數", min_value=0.0, value=0.0, step=1.0, format="%.4f")
-            tx_currency = c6.selectbox("計價幣別", ["TWD", "USD", "HKD", "JPY", "EUR"], index=0)
+        _sym_typed = st.text_input(
+            "股票代碼 / 名稱",
+            key="tx_symbol_pick",
+            placeholder="例：TSLA / 2330 / Tesla / 台積電",
+            help="可輸入代碼或公司名，下方會出現候選清單",
+        ).strip()
 
-            c7, c8 = st.columns([1, 1])
-            _auto_twd = tx_price * tx_shares if tx_currency == "TWD" else 0.0
-            tx_twd = c7.number_input(
-                "台幣總額（手續費含）", min_value=0.0, value=_auto_twd, step=100.0, format="%.0f",
-                help="非台股可手動輸入實際扣款金額；台股留空會自動 = 單價 × 股數",
-            )
-            tx_note = c8.text_input("備註（選填）", placeholder="如：定期定額 / 第X次補倉")
+        if _sym_typed and len(_sym_typed) >= 2:
+            _tx_matches = _cached_search(_sym_typed)
+            _tx_matches = [m for m in _tx_matches if m["symbol"].upper() != _sym_typed.upper()]
+            if _tx_matches:
+                st.caption("🔍 可能符合（點選帶入）：")
+                for _idx, m in enumerate(_tx_matches[:5]):
+                    _lbl = f"{m['symbol']}  ·  {m['name'][:22]}"
+                    if m.get("exchange"):
+                        _lbl += f"  ({m['exchange']})"
+                    if st.button(_lbl, key=f"tx_match_{_idx}_{m['symbol']}", use_container_width=True):
+                        st.session_state["tx_symbol_prefill"] = m["symbol"]
+                        st.rerun()
 
-            submitted = st.form_submit_button("儲存交易", type="primary", use_container_width=True)
-            if submitted:
-                if not tx_symbol or tx_price <= 0 or tx_shares <= 0:
-                    st.error("請填寫代碼、單價、股數")
-                else:
-                    # 非台幣計價時，若沒填台幣總額，嘗試自動換算
-                    final_twd = tx_twd
-                    if tx_currency != "TWD" and final_twd <= 0:
-                        fx = get_fx_rate(tx_currency, "TWD")
-                        if fx:
-                            final_twd = tx_price * tx_shares * fx
-                    add_transaction(
-                        symbol=tx_symbol,
-                        action="buy" if tx_action == "買進" else "sell",
-                        trade_date=tx_date.isoformat(),
-                        price=tx_price,
-                        shares=tx_shares,
-                        twd_amount=final_twd if final_twd > 0 else None,
-                        currency=tx_currency,
-                        note=tx_note,
-                    )
-                    st.success(f"已記錄：{tx_action} {tx_symbol} × {tx_shares}")
-                    st.rerun()
+        tx_symbol = _sym_typed.upper()
+
+        # ── 表單其餘欄位（不用 st.form，讓幣別切換可即時改 label）──
+        c2, c3 = st.columns([1, 1])
+        tx_action = c2.selectbox("買賣", ["買進", "賣出"], key="tx_action")
+        tx_date = c3.date_input("交易日期", value=_date.today(), key="tx_date")
+
+        c4, c5, c6 = st.columns([1, 1, 1])
+        tx_price = c4.number_input(
+            "成交單價（原幣）", min_value=0.0, value=0.0, step=0.01, format="%.4f",
+            key="tx_price",
+        )
+        tx_shares = c5.number_input(
+            "股數", min_value=0.0, value=0.0, step=1.0, format="%.4f",
+            key="tx_shares",
+        )
+        tx_currency = c6.selectbox(
+            "計價幣別", ["TWD", "USD", "HKD", "JPY", "EUR"], index=0,
+            key="tx_currency",
+        )
+
+        c7, c8 = st.columns([1, 1])
+        with c7:
+            # 外幣股票：可選 NT$ 或原幣輸入金額；台股：固定 NT$
+            if tx_currency != "TWD":
+                _amt_ccy = st.radio(
+                    "金額幣別",
+                    ["NT$", tx_currency],
+                    horizontal=True,
+                    key="tx_amt_ccy",
+                    label_visibility="collapsed",
+                )
+            else:
+                _amt_ccy = "NT$"
+
+            if _amt_ccy == "NT$":
+                _auto = tx_price * tx_shares if tx_currency == "TWD" else 0.0
+                _amt_input = st.number_input(
+                    "台幣總額（手續費含）", min_value=0.0,
+                    value=_auto, step=100.0, format="%.0f",
+                    key="tx_amt_twd",
+                    help="實際扣款台幣金額；台股可留空自動 = 單價 × 股數",
+                )
+                tx_twd = _amt_input
+            else:
+                _auto_native = tx_price * tx_shares
+                _amt_input = st.number_input(
+                    f"{tx_currency} 總額（手續費含）", min_value=0.0,
+                    value=_auto_native, step=1.0, format="%.4f",
+                    key="tx_amt_native",
+                    help=f"實際扣款 {tx_currency} 金額（含手續費）",
+                )
+                # 換算成 TWD 存進 DB
+                _fx_native_to_twd = get_fx_rate(tx_currency, "TWD")
+                tx_twd = _amt_input * _fx_native_to_twd if _fx_native_to_twd else 0
+                if _fx_native_to_twd and _amt_input > 0:
+                    st.caption(f"≈ NT${tx_twd:,.0f}（匯率 {_fx_native_to_twd:.4f}）")
+
+        tx_note = c8.text_input(
+            "備註（選填）", placeholder="如：定期定額 / 第X次補倉",
+            key="tx_note",
+        )
+
+        submitted = st.button(
+            "儲存交易", type="primary", use_container_width=True,
+            key="tx_submit",
+        )
+        if submitted:
+            if not tx_symbol or tx_price <= 0 or tx_shares <= 0:
+                st.error("請填寫代碼、單價、股數")
+            else:
+                final_twd = tx_twd
+                if tx_currency != "TWD" and final_twd <= 0:
+                    fx = get_fx_rate(tx_currency, "TWD")
+                    if fx:
+                        final_twd = tx_price * tx_shares * fx
+                add_transaction(
+                    symbol=tx_symbol,
+                    action="buy" if tx_action == "買進" else "sell",
+                    trade_date=tx_date.isoformat(),
+                    price=tx_price,
+                    shares=tx_shares,
+                    twd_amount=final_twd if final_twd > 0 else None,
+                    currency=tx_currency,
+                    note=tx_note,
+                )
+                st.success(f"已記錄：{tx_action} {tx_symbol} × {tx_shares}")
+                # 清空輸入
+                for _k in ("tx_price", "tx_shares", "tx_amt_twd",
+                           "tx_amt_native", "tx_note"):
+                    if _k in st.session_state:
+                        del st.session_state[_k]
+                st.session_state["tx_symbol_prefill"] = ""
+                st.rerun()
 
     # ── 持倉總覽 ──────────────────────────────
     holdings = get_holdings()
@@ -1129,17 +1208,16 @@ with st.container(border=True):
     # 不使用 st.form，改用普通 widget — 每個 input 變動會自動寫入 session_state，
     # 按下按鈕時 rerun 從 session_state 讀最新值，最可靠
     f1, f2, f3 = st.columns([1, 1, 1.2])
-    # 把當前股價嵌入 key，市場價一變動 widget 重新初始化 → 永遠同步當前股價
-    _price_key = f"q_pr_{used_sym}_{_cur_price_val:.4f}"
-    q_price = f1.number_input(
-        f"單價 ({_cur_ccy})", min_value=0.0,
-        value=float(_cur_price_val), step=0.01, format="%.4f",
-        key=_price_key,
-    )
+    # 單價鎖定 = 當前市價，不允許手改（避免拍腦袋輸錯）。需改用歷史價請到「📒 帳務」
+    f1.metric(f"成交單價 ({_cur_ccy})", f"{_cur_price_val:,.4f}")
+    q_price = float(_cur_price_val)
 
     _fx_to_twd = None
     if _cur_ccy != "TWD":
         _fx_to_twd = get_fx_rate(_cur_ccy, "TWD")
+
+    # 是否為外幣股票（決定要不要顯示幣別切換）
+    _is_foreign = (_cur_ccy != "TWD") and _fx_to_twd
 
     if _input_mode == "依股數":
         q_shares = f2.number_input(
@@ -1147,32 +1225,76 @@ with st.container(border=True):
             key=f"q_sh_{used_sym}",
             help="台股 1 張 = 1000 股；零股可填小數",
         )
-        _est_twd = q_price * q_shares
-        if _fx_to_twd and q_shares > 0:
-            _est_twd = q_price * q_shares * _fx_to_twd
-        q_twd_input = f3.number_input(
-            "台幣總額（可微調含手續費）", min_value=0.0,
-            value=float(_est_twd), step=100.0, format="%.0f",
-            key=f"q_twd_{used_sym}",
-        )
-    else:
-        q_twd_input = f2.number_input(
-            "台幣金額 (NT$)", min_value=0.0, value=0.0, step=1000.0, format="%.0f",
-            key=f"q_twd_amt_{used_sym}",
-            help="輸入實際扣款金額，系統自動算股數",
-        )
-        if q_price > 0 and q_twd_input > 0:
-            if _cur_ccy == "TWD":
-                q_shares = q_twd_input / q_price
+        with f3:
+            if _is_foreign:
+                _amt_ccy = st.radio(
+                    "金額幣別",
+                    ["NT$", _cur_ccy],
+                    horizontal=True,
+                    key=f"q_amt_ccy_{used_sym}",
+                    label_visibility="collapsed",
+                )
             else:
-                fx_twd_to_native = get_fx_rate("TWD", _cur_ccy)
-                if fx_twd_to_native:
-                    native_amount = q_twd_input * fx_twd_to_native
-                    q_shares = native_amount / q_price
+                _amt_ccy = "NT$"
+
+            if _amt_ccy == "NT$":
+                _est = q_price * q_shares * (_fx_to_twd if _is_foreign else 1)
+                _amt_input = st.number_input(
+                    "台幣總額（含手續費）", min_value=0.0,
+                    value=float(_est), step=100.0, format="%.0f",
+                    key=f"q_twd_{used_sym}",
+                )
+                q_twd_input = _amt_input
+            else:
+                _est = q_price * q_shares
+                _amt_input = st.number_input(
+                    f"{_cur_ccy} 總額（含手續費）", min_value=0.0,
+                    value=float(_est), step=1.0, format="%.4f",
+                    key=f"q_native_{used_sym}",
+                )
+                # 換算回 TWD 存進 DB
+                q_twd_input = _amt_input * (_fx_to_twd or 0)
+    else:
+        with f2:
+            if _is_foreign:
+                _in_ccy = st.radio(
+                    "輸入幣別",
+                    ["NT$", _cur_ccy],
+                    horizontal=True,
+                    key=f"q_in_ccy_{used_sym}",
+                    label_visibility="collapsed",
+                )
+            else:
+                _in_ccy = "NT$"
+
+            if _in_ccy == "NT$":
+                _in_amt = st.number_input(
+                    "台幣金額", min_value=0.0,
+                    value=0.0, step=1000.0, format="%.0f",
+                    key=f"q_twd_amt_{used_sym}",
+                    help="輸入實際扣款台幣金額",
+                )
+                if q_price > 0 and _in_amt > 0:
+                    if _cur_ccy == "TWD":
+                        q_shares = _in_amt / q_price
+                    elif _fx_to_twd:
+                        fx_twd_to_native = get_fx_rate("TWD", _cur_ccy)
+                        q_shares = (_in_amt * fx_twd_to_native / q_price) if fx_twd_to_native else 0
+                    else:
+                        q_shares = 0
                 else:
                     q_shares = 0
-        else:
-            q_shares = 0
+                q_twd_input = _in_amt
+            else:
+                _in_amt = st.number_input(
+                    f"{_cur_ccy} 金額", min_value=0.0,
+                    value=0.0, step=10.0, format="%.4f",
+                    key=f"q_native_amt_{used_sym}",
+                    help=f"輸入實際扣款 {_cur_ccy} 金額",
+                )
+                q_shares = _in_amt / q_price if q_price > 0 and _in_amt > 0 else 0
+                q_twd_input = _in_amt * (_fx_to_twd or 0)
+
         f3.text_input(
             "自動算出股數",
             value=f"{q_shares:,.4f} 股" if q_shares > 0 else "—",
@@ -1194,6 +1316,7 @@ with st.container(border=True):
         "🔴  記錄賣出",
         use_container_width=True, key=f"q_sell_{used_sym}",
     )
+    st.caption("💡 單價鎖定 = 當前市價；需要記錄歷史成交價請到「📒 帳務」新增交易")
 
     if buy_clicked or sell_clicked:
         if q_price <= 0:
@@ -1222,11 +1345,11 @@ with st.container(border=True):
                 )
                 # 把訊息存進 session_state，下次 render 時顯示（避免 rerun 立即清掉）
                 st.session_state[_last_ok_key] = _msg
-                # 清空所有 input；單價 key 含股價後綴，用 prefix 比對
-                _fixed = {f"q_sh_{used_sym}", f"q_twd_{used_sym}",
-                          f"q_twd_amt_{used_sym}", f"q_note_{used_sym}"}
-                for _k in list(st.session_state.keys()):
-                    if _k in _fixed or _k.startswith(f"q_pr_{used_sym}_"):
+                # 清空 input（單價已鎖死為現價，不需清；幣別 radio 也保留）
+                for _k in (f"q_sh_{used_sym}", f"q_twd_{used_sym}",
+                           f"q_twd_amt_{used_sym}", f"q_native_{used_sym}",
+                           f"q_native_amt_{used_sym}", f"q_note_{used_sym}"):
+                    if _k in st.session_state:
                         del st.session_state[_k]
                 st.rerun()
             except Exception as e:

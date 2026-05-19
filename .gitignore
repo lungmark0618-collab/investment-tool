@@ -20,3 +20,10 @@ data/scan.log
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Sensitive credentials (never commit)
+*password*.txt
+*secret*.txt
+*credentials*.txt
+*.pem
+*.key

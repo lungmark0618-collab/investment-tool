@@ -30,7 +30,7 @@ from modules import fundamental, risk, valuation, allocation, position, portfoli
 from database.db import (
     save_analysis, get_history,
     add_to_watchlist, get_watchlist, remove_from_watchlist,
-    add_transaction, get_transactions, delete_transaction,
+    add_transaction, get_transactions, delete_transaction, update_transaction,
     get_holdings, get_avg_cost,
 )
 
@@ -1018,32 +1018,117 @@ if mode == "帳務":
 
     st.divider()
 
-    # ── 交易明細 ──────────────────────────────
+    # ── 交易明細（可編輯）──────────────────────────────
     st.subheader(f"交易明細{(' — ' + _market_key) if _market_key else ''}")
+    st.caption("✏️ 直接在表格內修改任何欄位、按 Enter 後上方持倉會自動重算；要刪除請勾選最左欄的 ✕ 後按下方按鈕")
+
     if not all_tx:
         st.caption("（無紀錄）")
     else:
+        # 篩選
         f1, _ = st.columns([1, 3])
         all_syms = sorted(set(t["symbol"] for t in all_tx))
-        filter_sym = f1.selectbox("篩選代碼", ["全部"] + all_syms)
+        filter_sym = f1.selectbox("篩選代碼", ["全部"] + all_syms, key="tx_filter_sym")
         shown = [t for t in all_tx if filter_sym == "全部" or t["symbol"] == filter_sym]
 
-        for t in shown[:50]:
-            cols = st.columns([0.7, 1, 0.9, 1.1, 1.1, 1.1, 1.8, 0.5])
-            _mkt = _classify_market(t["symbol"], t.get("currency"))
-            cols[0].caption("🇹🇼" if _mkt == "台股" else ("🇺🇸" if _mkt == "美股" else "🌐"))
-            cols[1].markdown(f"**{t['trade_date']}**")
-            cols[2].markdown("🟢 買" if t["action"] == "buy" else "🔴 賣")
-            cols[3].markdown(f"**{t['symbol']}**")
-            cols[4].caption(f"{t['shares']:,.2f} 股")
-            cols[5].caption(f"單價 {t['price']:,.4f} {t['currency']}")
-            twd_str = f"NT${t['twd_amount']:,.0f}" if t.get("twd_amount") else "-"
-            cols[6].caption(f"{twd_str}  {t.get('note') or ''}")
-            if cols[7].button("✕", key=f"del_tx_{t['id']}", help="刪除此筆"):
-                delete_transaction(t["id"])
-                st.rerun()
-        if len(shown) > 50:
-            st.caption(f"…還有 {len(shown) - 50} 筆未顯示")
+        if not shown:
+            st.caption("（沒有符合的紀錄）")
+        else:
+            # 準備 dataframe 給 data_editor
+            df_rows = []
+            for t in shown:
+                df_rows.append({
+                    "id": t["id"],
+                    "刪除": False,
+                    "日期": t["trade_date"],
+                    "動作": "買進" if t["action"] == "buy" else "賣出",
+                    "代碼": t["symbol"],
+                    "股數": float(t["shares"]),
+                    "單價(原幣)": float(t["price"]),
+                    "幣別": t.get("currency") or "TWD",
+                    "台幣總額": float(t.get("twd_amount") or 0),
+                    "備註": t.get("note") or "",
+                })
+            edit_df = pd.DataFrame(df_rows)
+
+            edited = st.data_editor(
+                edit_df,
+                key="tx_editor",
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
+                    "刪除": st.column_config.CheckboxColumn(
+                        "✕", help="勾起來後按下方「刪除勾選」", width="small",
+                    ),
+                    "日期": st.column_config.TextColumn("日期", help="YYYY-MM-DD"),
+                    "動作": st.column_config.SelectboxColumn(
+                        "動作", options=["買進", "賣出"], required=True,
+                    ),
+                    "代碼": st.column_config.TextColumn("代碼", required=True),
+                    "股數": st.column_config.NumberColumn("股數", format="%.4f", step=0.0001),
+                    "單價(原幣)": st.column_config.NumberColumn("單價(原幣)", format="%.4f", step=0.0001),
+                    "幣別": st.column_config.SelectboxColumn(
+                        "幣別", options=["TWD", "USD", "HKD", "JPY", "EUR"],
+                    ),
+                    "台幣總額": st.column_config.NumberColumn("台幣總額", format="%.0f", step=100),
+                    "備註": st.column_config.TextColumn("備註"),
+                },
+                column_order=["刪除", "日期", "動作", "代碼", "股數",
+                              "單價(原幣)", "幣別", "台幣總額", "備註", "id"],
+            )
+
+            # 比對差異並儲存
+            col_save, col_del = st.columns([1, 1])
+            if col_save.button("💾 儲存修改", type="primary", use_container_width=True):
+                changes = 0
+                edit_lookup = {int(r["id"]): r for _, r in edited.iterrows()}
+                for orig in shown:
+                    new_row = edit_lookup.get(int(orig["id"]))
+                    if new_row is None:
+                        continue
+                    diff = {}
+                    field_map = {
+                        "trade_date": str(new_row["日期"]),
+                        "action": "buy" if new_row["動作"] == "買進" else "sell",
+                        "symbol": str(new_row["代碼"]).upper(),
+                        "shares": float(new_row["股數"]),
+                        "price": float(new_row["單價(原幣)"]),
+                        "currency": str(new_row["幣別"]),
+                        "twd_amount": float(new_row["台幣總額"]),
+                        "note": str(new_row["備註"]),
+                    }
+                    orig_map = {
+                        "trade_date": orig["trade_date"],
+                        "action": orig["action"],
+                        "symbol": orig["symbol"],
+                        "shares": float(orig["shares"]),
+                        "price": float(orig["price"]),
+                        "currency": orig.get("currency") or "TWD",
+                        "twd_amount": float(orig.get("twd_amount") or 0),
+                        "note": orig.get("note") or "",
+                    }
+                    for k, v in field_map.items():
+                        if v != orig_map.get(k):
+                            diff[k] = v
+                    if diff:
+                        update_transaction(int(orig["id"]), **diff)
+                        changes += 1
+                if changes:
+                    st.success(f"已更新 {changes} 筆交易，持倉重新計算中...")
+                    st.rerun()
+                else:
+                    st.info("沒有偵測到變更")
+
+            if col_del.button("🗑️ 刪除勾選", use_container_width=True):
+                to_delete = [int(r["id"]) for _, r in edited.iterrows() if r.get("刪除")]
+                if not to_delete:
+                    st.info("沒有勾選任何項目")
+                else:
+                    for tx_id in to_delete:
+                        delete_transaction(tx_id)
+                    st.success(f"已刪除 {len(to_delete)} 筆交易")
+                    st.rerun()
 
     st.stop()
 

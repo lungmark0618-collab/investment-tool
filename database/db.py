@@ -251,6 +251,35 @@ def delete_transaction(tx_id: int):
         conn.execute(text("DELETE FROM transactions WHERE id=:i"), {"i": int(tx_id)})
 
 
+def update_transaction(tx_id: int, **fields):
+    """更新交易紀錄的指定欄位。
+    允許欄位: symbol, action, trade_date, price, shares, twd_amount, currency, note
+    """
+    if not fields:
+        return
+    allowed = {"symbol", "action", "trade_date", "price",
+               "shares", "twd_amount", "currency", "note"}
+    sets = []
+    params = {"i": int(tx_id)}
+    for k, v in fields.items():
+        if k not in allowed:
+            continue
+        sets.append(f"{k}=:{k}")
+        if k == "symbol":
+            v = str(v).upper()
+        elif k == "action":
+            v = str(v).lower()
+        params[k] = v
+    if not sets:
+        return
+    init_db()
+    with _get_engine().begin() as conn:
+        conn.execute(
+            text(f"UPDATE transactions SET {', '.join(sets)} WHERE id=:i"),
+            params,
+        )
+
+
 def get_holdings() -> List[Dict]:
     """FIFO 算法計算每檔目前持倉與加權平均成本。"""
     init_db()

@@ -10,6 +10,7 @@ def calculate(
     fundamental_score: float,
     market_mult: float = 1.0,
     market_regime: Optional[str] = None,
+    existing_position_months: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Determine this month's invest ratio based on valuation and market position.
@@ -80,6 +81,22 @@ def calculate(
         rationale.append(
             f"大盤狀態{regime_tag}乘數 ×{market_mult:.2f}，比例 {prev:.0%} → {invest_ratio:.0%}"
         )
+
+    # ── 既有持倉 overlay：部位過大時降低投入 ─────────────────────────────
+    if existing_position_months is not None and existing_position_months > 0:
+        rationale.append(f"目前持倉相當於 {existing_position_months:.1f} 個月預算")
+        if existing_position_months > 10:
+            prev = invest_ratio
+            invest_ratio *= 0.5
+            rationale.append(
+                f"持倉部位龐大（> 10 個月預算），投入 ×0.5：{prev:.0%} → {invest_ratio:.0%}"
+            )
+        elif existing_position_months > 5:
+            prev = invest_ratio
+            invest_ratio *= 0.8
+            rationale.append(
+                f"持倉部位偏重（> 5 個月預算），投入 ×0.8：{prev:.0%} → {invest_ratio:.0%}"
+            )
 
     invest_amount = monthly_budget * invest_ratio
     cash_ratio = max(0.0, 1.0 - invest_ratio)

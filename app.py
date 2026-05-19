@@ -1300,6 +1300,12 @@ with st.spinner("分析中..."):
     _mkt_mult = _regime.get("budget_multiplier", 1.0) if _regime.get("available") else 1.0
     _mkt_label = _regime.get("regime") if _regime.get("available") else None
 
+    # 持倉佔月預算的倍數（用台幣比較）— 給 allocation 判斷部位是否過大
+    _existing_months = None
+    _hold_for_alloc = next((h for h in get_holdings() if h["symbol"] == used_sym), None)
+    if _hold_for_alloc and twd_budget > 0:
+        _existing_months = float(_hold_for_alloc["twd_cost"]) / float(twd_budget)
+
     alloc_result = allocation.calculate(
         monthly_budget=budget_in_stock_ccy,
         valuation_status=val_result["status"],
@@ -1308,6 +1314,7 @@ with st.spinner("分析中..."):
         fundamental_score=fund_result["total_score"],
         market_mult=_mkt_mult,
         market_regime=_mkt_label,
+        existing_position_months=_existing_months,
     )
     # Attach FX info for display
     alloc_result["twd_budget"] = twd_budget

@@ -1163,13 +1163,13 @@ if mode == "帳務":
                         "幣別", options=["TWD", "USD", "HKD", "JPY", "EUR"],
                     ),
                     "金額(原幣)": st.column_config.NumberColumn(
-                        "金額(原幣)", format="%.2f", step=1,
+                        "金額(原幣)", format="%.2f", step=0.01,
                         help="輸入該幣別的實際金額（含手續費）。儲存時自動換算成台幣存進帳本",
                     ),
                     "備註": st.column_config.TextColumn("備註"),
                 },
                 column_order=["刪除", "日期", "動作", "代碼", "股數",
-                              "幣別", "金額(原幣)", "備註", "id"],
+                              "幣別", "金額(原幣)", "備註"],
             )
 
             # 比對差異並儲存

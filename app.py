@@ -858,8 +858,20 @@ if mode == "帳務":
         else:
             st.caption("（尚無持倉，先新增買進交易）")
     else:
-        # 快取個股資料避免每次 rerun 都打 yfinance
-        @st.cache_data(ttl=300, show_spinner=False)
+        # ── 自動更新設定 ──
+        _refresh_col1, _refresh_col2 = st.columns([1, 3])
+        _refresh_secs = _refresh_col1.selectbox(
+            "更新頻率",
+            options=[5, 10, 30, 60, 0],
+            format_func=lambda x: {0: "暫停", 5: "每 5 秒", 10: "每 10 秒",
+                                    30: "每 30 秒", 60: "每 1 分鐘"}[x],
+            index=1,
+            key="hold_refresh_secs",
+            help="自動重抓現價更新損益。台股盤後或夜間建議調至暫停",
+        )
+
+        # 快取 quote — TTL 設成最短間隔的一半確保更新
+        @st.cache_data(ttl=3, show_spinner=False)
         def _cached_quote(symbol: str):
             try:
                 tk, _ = fetch_ticker(symbol)
@@ -875,122 +887,113 @@ if mode == "帳務":
             except Exception:
                 return None
 
-        total_cost = 0.0
-        total_value = 0.0
+        # 用 fragment 包卡片區段，做局部自動更新
+        @st.fragment(run_every=f"{_refresh_secs}s" if _refresh_secs > 0 else None)
+        def _render_holdings_cards():
+            from datetime import datetime as _dt_now
+            total_cost = 0.0
+            total_value = 0.0
 
-        # ── 卡片式持倉 ─────────────────────────────
-        for h in holdings_filtered:
-            total_cost += h["twd_cost"]
-            q = _cached_quote(h["symbol"])
-            cur_price = q["cur_price"] if q else None
-            name = q["name"] if q else h["symbol"]
+            _render_holdings_cards.last_update = _dt_now.now().strftime("%H:%M:%S")
+            st.caption(f"⏱️ 最後更新：{_render_holdings_cards.last_update}"
+                       + (f"（{_refresh_secs} 秒後自動重新整理）" if _refresh_secs else "（自動更新已暫停）"))
 
-            # 損益（台股慣例：紅漲 綠跌）
-            if cur_price and h["avg_cost"]:
-                pnl_pct = (cur_price - h["avg_cost"]) / h["avg_cost"] * 100
-                per_share_twd_cost = h["twd_cost"] / h["shares"] if h["shares"] else 0
-                cur_value_twd = (cur_price / h["avg_cost"]) * per_share_twd_cost * h["shares"]
-                pnl_twd = cur_value_twd - h["twd_cost"]
-                total_value += cur_value_twd
-            else:
-                pnl_pct = 0
-                pnl_twd = 0
-                cur_value_twd = h["twd_cost"]
-                total_value += h["twd_cost"]
+            for h in holdings_filtered:
+                total_cost += h["twd_cost"]
+                q = _cached_quote(h["symbol"])
+                cur_price = q["cur_price"] if q else None
+                name = q["name"] if q else h["symbol"]
 
-            # 台股色：紅漲綠跌
-            _up = pnl_pct > 0
-            _down = pnl_pct < 0
-            _pnl_color = "#e74c3c" if _up else ("#2ecc71" if _down else "#95a5a6")
+                if cur_price and h["avg_cost"]:
+                    pnl_pct = (cur_price - h["avg_cost"]) / h["avg_cost"] * 100
+                    per_share_twd_cost = h["twd_cost"] / h["shares"] if h["shares"] else 0
+                    cur_value_twd = (cur_price / h["avg_cost"]) * per_share_twd_cost * h["shares"]
+                    pnl_twd = cur_value_twd - h["twd_cost"]
+                    total_value += cur_value_twd
+                else:
+                    pnl_pct = 0
+                    pnl_twd = 0
+                    cur_value_twd = h["twd_cost"]
+                    total_value += h["twd_cost"]
 
-            # 標籤：碎股（< 1 股） / 美股 / 台股
-            _mkt = _classify_market(h["symbol"], h.get("currency"))
-            if h["shares"] < 1:
-                _badge_text = "碎股"
-                _badge_color = "#3498db"
-            elif _mkt == "美股":
-                _badge_text = "美股"
-                _badge_color = "#9b59b6"
-            elif _mkt == "台股":
-                _badge_text = "台股"
-                _badge_color = "#f39c12"
-            else:
-                _badge_text = _mkt
-                _badge_color = "#7f8c8d"
+                # 台股色：紅漲綠跌
+                _pnl_color = "#e74c3c" if pnl_pct > 0 else ("#2ecc71" if pnl_pct < 0 else "#95a5a6")
 
-            with st.container(border=True):
-                # 標題列
-                st.markdown(
-                    f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:4px'>"
-                    f"<span style='background:{_badge_color};color:white;padding:3px 14px;"
-                    f"border-radius:14px;font-size:0.85rem;font-weight:600'>{_badge_text}</span>"
-                    f"<span style='font-weight:700;font-size:1.1rem'>{h['symbol']}</span>"
-                    f"</div>"
-                    f"<div style='font-size:1.3rem;font-weight:600;margin-bottom:12px'>{name}</div>",
-                    unsafe_allow_html=True,
-                )
+                # 標籤
+                _mkt = _classify_market(h["symbol"], h.get("currency"))
+                if h["shares"] < 1:
+                    _badge_text, _badge_color = "碎股", "#3498db"
+                elif _mkt == "美股":
+                    _badge_text, _badge_color = "美股", "#9b59b6"
+                elif _mkt == "台股":
+                    _badge_text, _badge_color = "台股", "#f39c12"
+                else:
+                    _badge_text, _badge_color = _mkt, "#7f8c8d"
 
-                # 三個關鍵數字
-                row1c1, row1c2 = st.columns([1, 1])
-                row1c1.markdown("<div style='color:#95a5a6'>總股數</div>", unsafe_allow_html=True)
-                row1c2.markdown(
-                    f"<div style='text-align:right;font-size:1.2rem;font-weight:500'>{h['shares']:.4f}</div>",
-                    unsafe_allow_html=True,
-                )
-                row2c1, row2c2 = st.columns([1, 1])
-                row2c1.markdown("<div style='color:#95a5a6'>成交均價</div>", unsafe_allow_html=True)
-                row2c2.markdown(
-                    f"<div style='text-align:right;font-size:1.2rem;font-weight:500'>{h['avg_cost']:.4f}</div>",
-                    unsafe_allow_html=True,
-                )
-                row3c1, row3c2 = st.columns([1, 1])
-                row3c1.markdown("<div style='color:#95a5a6'>總預估損益</div>", unsafe_allow_html=True)
-                row3c2.markdown(
-                    f"<div style='text-align:right;font-size:1.2rem;font-weight:700;color:{_pnl_color}'>"
-                    f"{pnl_twd:+,.2f} ({pnl_pct:+.2f}%)</div>",
-                    unsafe_allow_html=True,
-                )
-
-                st.divider()
-
-                # 次要資訊
-                row4c1, row4c2 = st.columns([1, 1])
-                row4c1.markdown("<div style='color:#95a5a6'>總預估現值</div>", unsafe_allow_html=True)
-                row4c2.markdown(
-                    f"<div style='text-align:right;font-size:1.05rem'>NT${cur_value_twd:,.0f}</div>",
-                    unsafe_allow_html=True,
-                )
-                row5c1, row5c2 = st.columns([1, 1])
-                row5c1.markdown("<div style='color:#95a5a6'>總成本</div>", unsafe_allow_html=True)
-                row5c2.markdown(
-                    f"<div style='text-align:right;font-size:1.05rem'>NT${h['twd_cost']:,.0f}</div>",
-                    unsafe_allow_html=True,
-                )
-                row6c1, row6c2 = st.columns([1, 1])
-                row6c1.markdown("<div style='color:#95a5a6'>最新價</div>", unsafe_allow_html=True)
-                row6c2.markdown(
-                    f"<div style='text-align:right;font-size:1.05rem'>"
-                    f"{(f'{cur_price:.4f}') if cur_price else '—'}</div>",
-                    unsafe_allow_html=True,
-                )
-
-                if h.get("twd_realized"):
-                    row7c1, row7c2 = st.columns([1, 1])
-                    row7c1.markdown("<div style='color:#95a5a6'>已實現</div>", unsafe_allow_html=True)
-                    row7c2.markdown(
-                        f"<div style='text-align:right;font-size:1.05rem'>"
-                        f"NT${h['twd_realized']:,.0f}</div>",
+                with st.container(border=True):
+                    st.markdown(
+                        f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:4px'>"
+                        f"<span style='background:{_badge_color};color:white;padding:3px 14px;"
+                        f"border-radius:14px;font-size:0.85rem;font-weight:600'>{_badge_text}</span>"
+                        f"<span style='font-weight:700;font-size:1.1rem'>{h['symbol']}</span>"
+                        f"</div>"
+                        f"<div style='font-size:1.3rem;font-weight:600;margin-bottom:12px'>{name}</div>",
                         unsafe_allow_html=True,
                     )
 
-        # 底部總計
-        st.divider()
-        m1, m2, m3 = st.columns(3)
-        m1.metric("總成本", f"NT${total_cost:,.0f}")
-        m2.metric("估計現值", f"NT${total_value:,.0f}")
-        _total_pnl = total_value - total_cost
-        _total_pct = (_total_pnl / total_cost * 100) if total_cost else 0
-        m3.metric("未實現損益", f"NT${_total_pnl:+,.0f}", f"{_total_pct:+.2f}%")
+                    r1c1, r1c2 = st.columns([1, 1])
+                    r1c1.markdown("<div style='color:#95a5a6'>總股數</div>", unsafe_allow_html=True)
+                    r1c2.markdown(
+                        f"<div style='text-align:right;font-size:1.2rem;font-weight:500'>{h['shares']:.4f}</div>",
+                        unsafe_allow_html=True)
+                    r2c1, r2c2 = st.columns([1, 1])
+                    r2c1.markdown("<div style='color:#95a5a6'>成交均價</div>", unsafe_allow_html=True)
+                    r2c2.markdown(
+                        f"<div style='text-align:right;font-size:1.2rem;font-weight:500'>{h['avg_cost']:.4f}</div>",
+                        unsafe_allow_html=True)
+                    r3c1, r3c2 = st.columns([1, 1])
+                    r3c1.markdown("<div style='color:#95a5a6'>總預估損益</div>", unsafe_allow_html=True)
+                    r3c2.markdown(
+                        f"<div style='text-align:right;font-size:1.2rem;font-weight:700;color:{_pnl_color}'>"
+                        f"{pnl_twd:+,.2f} ({pnl_pct:+.2f}%)</div>",
+                        unsafe_allow_html=True)
+
+                    st.divider()
+
+                    r4c1, r4c2 = st.columns([1, 1])
+                    r4c1.markdown("<div style='color:#95a5a6'>總預估現值</div>", unsafe_allow_html=True)
+                    r4c2.markdown(
+                        f"<div style='text-align:right;font-size:1.05rem'>NT${cur_value_twd:,.0f}</div>",
+                        unsafe_allow_html=True)
+                    r5c1, r5c2 = st.columns([1, 1])
+                    r5c1.markdown("<div style='color:#95a5a6'>總成本</div>", unsafe_allow_html=True)
+                    r5c2.markdown(
+                        f"<div style='text-align:right;font-size:1.05rem'>NT${h['twd_cost']:,.0f}</div>",
+                        unsafe_allow_html=True)
+                    r6c1, r6c2 = st.columns([1, 1])
+                    r6c1.markdown("<div style='color:#95a5a6'>最新價</div>", unsafe_allow_html=True)
+                    r6c2.markdown(
+                        f"<div style='text-align:right;font-size:1.05rem'>"
+                        f"{(f'{cur_price:.4f}') if cur_price else '—'}</div>",
+                        unsafe_allow_html=True)
+
+                    if h.get("twd_realized"):
+                        r7c1, r7c2 = st.columns([1, 1])
+                        r7c1.markdown("<div style='color:#95a5a6'>已實現</div>", unsafe_allow_html=True)
+                        r7c2.markdown(
+                            f"<div style='text-align:right;font-size:1.05rem'>NT${h['twd_realized']:,.0f}</div>",
+                            unsafe_allow_html=True)
+
+            # 底部總計（也在 fragment 內，會跟著刷新）
+            st.divider()
+            m1, m2, m3 = st.columns(3)
+            m1.metric("總成本", f"NT${total_cost:,.0f}")
+            m2.metric("估計現值", f"NT${total_value:,.0f}")
+            _total_pnl = total_value - total_cost
+            _total_pct = (_total_pnl / total_cost * 100) if total_cost else 0
+            m3.metric("未實現損益", f"NT${_total_pnl:+,.0f}", f"{_total_pct:+.2f}%")
+
+        _render_holdings_cards()
 
     st.divider()
 

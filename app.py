@@ -898,13 +898,8 @@ if mode == "帳務":
         # 用 fragment 包卡片區段，做局部自動更新
         @st.fragment(run_every=f"{_refresh_secs}s" if _refresh_secs > 0 else None)
         def _render_holdings_cards():
-            from datetime import datetime as _dt_now
             total_cost = 0.0
             total_value = 0.0
-
-            _render_holdings_cards.last_update = _dt_now.now().strftime("%H:%M:%S")
-            st.caption(f"⏱️ 最後更新：{_render_holdings_cards.last_update}"
-                       + (f"（{_refresh_secs} 秒後自動重新整理）" if _refresh_secs else "（自動更新已暫停）"))
 
             for h in holdings_filtered:
                 total_cost += h["twd_cost"]

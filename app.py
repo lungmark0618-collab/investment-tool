@@ -29,7 +29,7 @@ from database.db import (
     save_analysis, get_history,
     add_to_watchlist, get_watchlist, remove_from_watchlist,
     add_transaction, get_transactions, delete_transaction, update_transaction,
-    get_holdings, get_avg_cost,
+    get_holdings, get_avg_cost, get_realized_pnl,
 )
 
 # ─────────────────────────────────────────────
@@ -233,13 +233,28 @@ def _classify_market(symbol: str, currency: str = None) -> str:
 
 
 def _holding_value_twd(h: dict, cur_price):
-    """單一持倉的台幣現值與損益。與帳務卡片同一套公式（匯率以成本內含值近似）。
+    """單一持倉的台幣現值與損益（外幣以即時匯率換算現值）。
+    現值 = 現價 × 股數 × 即時匯率(原幣→TWD)；損益% 為台幣總報酬率，
+    與台幣損益一致。拿不到匯率時退回用成本內含匯率近似。
     回傳 (cur_value_twd, pnl_twd, pnl_pct)。"""
-    if cur_price and h.get("avg_cost"):
-        pnl_pct = (cur_price - h["avg_cost"]) / h["avg_cost"] * 100
-        cur_value_twd = (cur_price / h["avg_cost"]) * h["twd_cost"]
-        return cur_value_twd, cur_value_twd - h["twd_cost"], pnl_pct
-    return h["twd_cost"], 0.0, 0.0
+    twd_cost = h.get("twd_cost") or 0.0
+    if not (cur_price and h.get("shares")):
+        return twd_cost, 0.0, 0.0
+
+    ccy = h.get("currency") or "TWD"
+    fx = 1.0 if ccy in ("TWD", "") else _cached_fx(ccy, "TWD")
+
+    if fx:
+        cur_value_twd = cur_price * h["shares"] * fx
+    elif h.get("avg_cost"):
+        # 匯率暫時取不到 → 退回成本內含匯率近似
+        cur_value_twd = (cur_price / h["avg_cost"]) * twd_cost
+    else:
+        return twd_cost, 0.0, 0.0
+
+    pnl_twd = cur_value_twd - twd_cost
+    pnl_pct = (pnl_twd / twd_cost * 100) if twd_cost else 0.0
+    return cur_value_twd, pnl_twd, pnl_pct
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -599,8 +614,11 @@ if mode == "總覽":
     st.caption("彙整所有持倉的成本、現值、損益與配置分布（現價即時抓取）")
 
     _all_holdings = get_holdings()
-    if not _all_holdings:
-        st.info("尚無持倉，先到「📒 帳務」記錄買進交易後再回來看總覽")
+    _realized = get_realized_pnl()
+    _realized_total = sum(r["realized_twd"] for r in _realized)
+
+    if not _all_holdings and not _realized:
+        st.info("尚無持倉/交易，先到「📒 帳務」記錄買賣後再回來看總覽")
         st.stop()
 
     _ov_secs = st.selectbox(
@@ -614,6 +632,9 @@ if mode == "總覽":
 
     @st.fragment(run_every=f"{_ov_secs}s" if _ov_secs > 0 else None)
     def _render_overview():
+        if not _all_holdings:
+            st.caption("（目前無未出清持倉，下方為已實現損益）")
+            return
         rows = []
         total_cost = total_value = 0.0
         mkt_value = {"台股": 0.0, "美股": 0.0, "其他": 0.0}
@@ -637,11 +658,12 @@ if mode == "總覽":
         total_pct = (total_pnl / total_cost * 100) if total_cost else 0
 
         # ── 關鍵數字 ──
-        m1, m2, m3, m4 = st.columns(4)
+        m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("持倉檔數", f"{len(rows)} 檔")
         m2.metric("總成本", f"NT${total_cost:,.0f}")
         m3.metric("估計現值", f"NT${total_value:,.0f}")
         m4.metric("未實現損益", f"NT${total_pnl:+,.0f}", f"{total_pct:+.2f}%")
+        m5.metric("已實現損益", f"NT${_realized_total:+,.0f}", help="含已出清標的，FIFO 計算")
 
         st.divider()
 
@@ -721,8 +743,25 @@ if mode == "總覽":
         st.dataframe(df, width="stretch", hide_index=True)
 
     _render_overview()
-    st.caption("💡 現值/損益的匯率以建倉成本內含值近似（未反映即時匯率變動）；"
-               "已實現損益與已出清標的未納入，僅供參考。")
+    st.caption("💡 外幣現值以即時匯率換算，損益% 為台幣總報酬率（含匯率變動）；數據僅供參考。")
+
+    # ── 已實現損益（含已出清標的；不需即時價，放 fragment 外只算一次）──
+    if _realized:
+        st.divider()
+        st.subheader("💰 已實現損益（含已出清標的）")
+        _rz = sorted(_realized, key=lambda r: r["realized_twd"], reverse=True)
+        df_r = pd.DataFrame([{
+            "代碼": r["symbol"],
+            "市場": _classify_market(r["symbol"], r.get("currency")),
+            "賣出金額(NT$)": round(r["proceeds_twd"]),
+            "對應成本(NT$)": round(r["cost_twd"]),
+            "已實現損益(NT$)": round(r["realized_twd"]),
+            "報酬率": (f"{r['realized_twd'] / r['cost_twd'] * 100:+.2f}%" if r["cost_twd"] else "—"),
+            "最後賣出": r["last_sell_date"],
+        } for r in _rz])
+        st.dataframe(df_r, width="stretch", hide_index=True)
+        st.caption(f"本表已實現損益合計 NT${_realized_total:+,.0f}"
+                   "（= 賣出金額 − FIFO 對應成本，皆台幣、已含交易當時匯率）")
     st.stop()
 
 
@@ -1576,14 +1615,22 @@ with st.container(border=True):
     # 按下按鈕時 rerun 從 session_state 讀最新值，最可靠
     f1, f2, f3 = st.columns([1, 1, 1.2])
     # 單價鎖定 = 當前市價，不允許手改（避免拍腦袋輸錯）。需改用歷史價請到「📒 帳務」
+    # 例外：若抓不到現價（=0），改開放手動輸入，否則使用者會完全無法記錄
     with f1:
-        st.markdown(
-            f"<div style='color:#95a5a6;font-size:0.85rem'>本筆成交單價 ({_cur_ccy})</div>"
-            f"<div style='font-size:1.6rem;font-weight:700;color:#3498db'>"
-            f"🔒 {_cur_price_val:,.4f}</div>",
-            unsafe_allow_html=True,
-        )
-    q_price = float(_cur_price_val)
+        if _cur_price_val > 0:
+            st.markdown(
+                f"<div style='color:#95a5a6;font-size:0.85rem'>本筆成交單價 ({_cur_ccy})</div>"
+                f"<div style='font-size:1.6rem;font-weight:700;color:#3498db'>"
+                f"🔒 {_cur_price_val:,.4f}</div>",
+                unsafe_allow_html=True,
+            )
+            q_price = float(_cur_price_val)
+        else:
+            st.caption(f"本筆成交單價 ({_cur_ccy}) — 抓不到現價，請手動輸入")
+            q_price = float(st.number_input(
+                "成交單價", min_value=0.0, value=0.0, step=0.01, format="%.4f",
+                key=f"q_price_manual_{used_sym}", label_visibility="collapsed",
+            ))
 
     _fx_to_twd = None
     if _cur_ccy != "TWD":

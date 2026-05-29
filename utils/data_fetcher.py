@@ -11,6 +11,37 @@ def normalize_symbol(symbol: str) -> str:
     return symbol
 
 
+def _quote_ok(t: yf.Ticker) -> bool:
+    """多重訊號確認標的存在。
+    Yahoo 常對雲端/資料中心 IP 限流，使 .info 回空 dict，
+    導致 TSLA 這種明明存在的代碼被誤判「找不到」。改用走不同端點的
+    fast_info / 一小段 history 當後備，任一成功即視為有效。"""
+    try:
+        info = t.info
+        if info and (
+            info.get("currentPrice")
+            or info.get("regularMarketPrice")
+            or info.get("previousClose")
+            or info.get("navPrice")
+        ):
+            return True
+    except Exception:
+        pass
+    try:
+        fi = t.fast_info
+        if fi and fi.get("lastPrice"):
+            return True
+    except Exception:
+        pass
+    try:
+        h = t.history(period="5d")
+        if h is not None and not h.empty:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def fetch_ticker(symbol: str) -> Tuple[Optional[yf.Ticker], str]:
     """Return (Ticker, used_symbol) or (None, symbol) on failure."""
     raw = symbol.strip().upper()
@@ -26,23 +57,47 @@ def fetch_ticker(symbol: str) -> Tuple[Optional[yf.Ticker], str]:
     for sym in candidates:
         try:
             t = yf.Ticker(sym)
-            info = t.info
-            if info and (
-                info.get("currentPrice")
-                or info.get("regularMarketPrice")
-                or info.get("previousClose")
-                or info.get("navPrice")
-            ):
+            if _quote_ok(t):
                 return t, sym
         except Exception:
             continue
     return None, symbol
 
 
+def _ensure_price(info: dict, ticker: yf.Ticker, history: pd.DataFrame) -> dict:
+    """info 被限流而缺價時，用 fast_info / history 收盤價補上 currentPrice，
+    讓股價、快速下單、估值等下游不至於整片 N/A。"""
+    if info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose"):
+        return info
+    try:
+        fi = ticker.fast_info
+        lp = fi.get("lastPrice") if fi else None
+        if lp:
+            info["currentPrice"] = float(lp)
+            if not info.get("currency"):
+                info["currency"] = fi.get("currency", "") or ""
+            return info
+    except Exception:
+        pass
+    if history is not None and not history.empty:
+        try:
+            info["currentPrice"] = float(history["Close"].iloc[-1])
+        except Exception:
+            pass
+    return info
+
+
 def get_all_data(ticker: yf.Ticker) -> Dict[str, Any]:
     """Fetch all required data from yfinance in one call."""
-    info = ticker.info or {}
-    history = ticker.history(period="5y")
+    try:
+        info = dict(ticker.info or {})  # copy 以便在限流時補價格
+    except Exception:
+        info = {}  # .info 被限流可能直接拋例外，不要讓整個分析掛掉
+    try:
+        history = ticker.history(period="5y")
+    except Exception:
+        history = pd.DataFrame()
+    info = _ensure_price(info, ticker, history)
     is_etf = info.get("quoteType", "") in ("ETF", "MUTUALFUND")
 
     if is_etf:

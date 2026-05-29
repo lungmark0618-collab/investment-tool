@@ -207,12 +207,26 @@ def _cached_quote(symbol: str):
         if not tk:
             return None
         info = tk.info or {}
-        return {
-            "cur_price": (info.get("currentPrice") or info.get("regularMarketPrice")
-                          or info.get("previousClose")),
-            "name": info.get("longName") or info.get("shortName") or symbol,
-            "currency": info.get("currency", ""),
-        }
+        price = (info.get("currentPrice") or info.get("regularMarketPrice")
+                 or info.get("previousClose"))
+        ccy = info.get("currency", "")
+        name = info.get("longName") or info.get("shortName") or symbol
+        # info 被限流時用 fast_info / history 後備，避免持倉現價整片空白
+        if not price:
+            try:
+                fi = tk.fast_info
+                price = fi.get("lastPrice") if fi else None
+                ccy = ccy or (fi.get("currency", "") if fi else "")
+            except Exception:
+                pass
+        if not price:
+            try:
+                h = tk.history(period="5d")
+                if h is not None and not h.empty:
+                    price = float(h["Close"].iloc[-1])
+            except Exception:
+                pass
+        return {"cur_price": price, "name": name, "currency": ccy}
     except Exception:
         return None
 

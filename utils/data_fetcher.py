@@ -3,6 +3,46 @@ import pandas as pd
 from typing import Optional, Tuple, Dict, Any
 
 
+def _make_session():
+    """瀏覽器擬真 session。
+
+    Yahoo 會依 User-Agent / TLS 指紋封鎖雲端（如 Streamlit Cloud）的 python 預設請求，
+    造成 .info / fast_info / history 全部回空 → 連 TSLA 都「找不到」。
+    用 curl_cffi 模擬 Chrome（含 TLS 指紋）可大幅降低被擋機率；
+    不可用時退回帶瀏覽器 UA 的 requests，再不行回 None（yfinance 用預設）。
+    """
+    try:
+        from curl_cffi import requests as _cffi
+        return _cffi.Session(impersonate="chrome")
+    except Exception:
+        pass
+    try:
+        import requests
+        s = requests.Session()
+        s.headers["User-Agent"] = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
+        return s
+    except Exception:
+        return None
+
+
+_SESSION = _make_session()
+_SESSION_OK = True  # 此 yfinance 版本是否接受 session= 參數
+
+
+def make_ticker(symbol: str) -> yf.Ticker:
+    """建立 yf.Ticker，盡量帶上擬真 session（降低被 Yahoo 封鎖機率）。"""
+    global _SESSION_OK
+    if _SESSION is not None and _SESSION_OK:
+        try:
+            return yf.Ticker(symbol, session=_SESSION)
+        except TypeError:
+            _SESSION_OK = False  # 此版本不收 session，之後不再嘗試
+    return yf.Ticker(symbol)
+
+
 def normalize_symbol(symbol: str) -> str:
     symbol = symbol.strip().upper()
     # Pure digits → assume Taiwan stock, append .TW
@@ -56,7 +96,7 @@ def fetch_ticker(symbol: str) -> Tuple[Optional[yf.Ticker], str]:
 
     for sym in candidates:
         try:
-            t = yf.Ticker(sym)
+            t = make_ticker(sym)
             if _quote_ok(t):
                 return t, sym
         except Exception:
@@ -151,14 +191,21 @@ def get_fx_rate(from_ccy: str, to_ccy: str) -> Optional[float]:
         return 1.0
     pair = f"{from_ccy}{to_ccy}=X"
     try:
-        t = yf.Ticker(pair)
-        price = (
-            t.info.get("regularMarketPrice")
-            or t.info.get("previousClose")
-            or t.fast_info.get("lastPrice")
-        )
-        if price:
-            return float(price)
+        t = make_ticker(pair)
+        # fast_info 最穩；.info 在雲端常被限流而拋例外，放後面並各自包 try
+        try:
+            lp = t.fast_info.get("lastPrice")
+            if lp:
+                return float(lp)
+        except Exception:
+            pass
+        try:
+            info = t.info or {}
+            price = info.get("regularMarketPrice") or info.get("previousClose")
+            if price:
+                return float(price)
+        except Exception:
+            pass
         hist = t.history(period="5d")
         if not hist.empty:
             return float(hist["Close"].iloc[-1])

@@ -13,7 +13,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
 
-from utils.data_fetcher import fetch_ticker, get_all_data, safe_float, get_fx_rate
+from utils.data_fetcher import fetch_ticker, get_all_data, safe_float, get_fx_rate, make_ticker
 from utils.search import search_stocks
 from utils import glossary
 from utils.notifier import (
@@ -274,9 +274,8 @@ def _holding_value_twd(h: dict, cur_price):
 @st.cache_data(ttl=3600, show_spinner=False)
 def _cached_index_history(symbol: str, period: str = "1y"):
     """Fetch index history for chart rendering. Returns dict with close/ma50/ma200/dates."""
-    import yfinance as yf
     try:
-        hist = yf.Ticker(symbol).history(period=period)
+        hist = make_ticker(symbol).history(period=period)
         if hist.empty:
             return None
         return {
@@ -1454,7 +1453,15 @@ with st.spinner(f"正在抓取 {symbol_input.upper()} 資料..."):
     used_sym, data = _cached_fetch(symbol_input)
 
 if data is None:
-    st.error(f"找不到 {symbol_input}，請確認代碼正確（台灣股票使用數字代碼，如 0050、2330）")
+    st.error(
+        f"暫時抓不到 **{symbol_input.upper()}** 的資料。\n\n"
+        "可能原因：\n"
+        "1. **資料來源（Yahoo）對雲端 IP 限流** — 最常見，稍等幾秒後按下方重試即可。\n"
+        "2. **代碼有誤** — 台股用數字（如 0050、2330）；美股用英文代碼（如 TSLA、VOO）。"
+    )
+    if st.button("🔄 重新抓取", key="refetch_btn", type="primary"):
+        _cached_fetch.clear()
+        st.rerun()
     st.stop()
 
 with st.spinner("分析中..."):

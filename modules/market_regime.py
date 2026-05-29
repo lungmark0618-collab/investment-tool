@@ -4,8 +4,8 @@
 產出資金配置乘數（逆向：恐慌時加碼、過熱時保留）。
 """
 from typing import Optional, Dict, Any
-import yfinance as yf
 import pandas as pd
+from utils.data_fetcher import make_ticker
 
 INDEX_TWII = "^TWII"   # 台灣加權
 INDEX_SPX = "^GSPC"    # S&P 500
@@ -14,7 +14,7 @@ INDEX_VIX = "^VIX"     # 恐慌指數
 
 def _fetch_index(symbol: str) -> Optional[pd.DataFrame]:
     try:
-        t = yf.Ticker(symbol)
+        t = make_ticker(symbol)
         hist = t.history(period="2y")
         if hist.empty:
             return None

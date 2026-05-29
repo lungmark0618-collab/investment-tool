@@ -298,13 +298,13 @@ def _render_market_charts():
     with col_us:
         if spx:
             st.plotly_chart(_index_chart(spx, "🇺🇸 S&P 500（近一年）", "#3498db"),
-                            use_container_width=True)
+                            width="stretch")
         else:
             st.caption("無法取得 S&P 500 資料")
     with col_tw:
         if twii:
             st.plotly_chart(_index_chart(twii, "🇹🇼 台股加權（近一年）", "#2ecc71"),
-                            use_container_width=True)
+                            width="stretch")
         else:
             st.caption("無法取得台股加權資料")
 
@@ -351,14 +351,14 @@ with st.sidebar:
         if st.button(
             f"{_icon}  {_name}",
             key=f"mode_btn_{_name}",
-            use_container_width=True,
+            width="stretch",
             type="primary" if _is_active else "secondary",
         ):
             st.session_state["mode"] = _name
             st.rerun()
     mode = st.session_state["mode"]
 
-    if st.button("📚 指標說明（隨時複習）", use_container_width=True, key="open_glossary"):
+    if st.button("📚 指標說明（隨時複習）", width="stretch", key="open_glossary"):
         _show_glossary_dialog()
     st.divider()
 
@@ -398,7 +398,7 @@ with st.sidebar:
                 _lbl = f"{m['symbol']}  ·  {m['name'][:22]}"
                 if m.get("exchange"):
                     _lbl += f"  ({m['exchange']})"
-                if st.button(_lbl, key=f"match_{_idx}_{m['symbol']}", use_container_width=True):
+                if st.button(_lbl, key=f"match_{_idx}_{m['symbol']}", width="stretch"):
                     st.session_state["symbol_prefill"] = m["symbol"]
                     st.session_state["auto_analyze"] = True
                     st.rerun()
@@ -429,7 +429,7 @@ with st.sidebar:
         help="輸入 0 表示尚未持有",
     )
 
-    _analyze_clicked = st.button("開始分析", type="primary", use_container_width=True)
+    _analyze_clicked = st.button("開始分析", type="primary", width="stretch")
     # 觸發分析後保持「已分析」狀態，rerun 不會丟掉結果
     if _analyze_clicked or st.session_state.get("auto_analyze", False):
         st.session_state["analyzed_symbol"] = symbol_input
@@ -449,7 +449,7 @@ with st.sidebar:
     if watchlist:
         for item in watchlist:
             col1, col2 = st.columns([3, 1])
-            if col1.button(item["symbol"], key=f"wl_{item['symbol']}", use_container_width=True):
+            if col1.button(item["symbol"], key=f"wl_{item['symbol']}", width="stretch"):
                 st.session_state["symbol_prefill"] = item["symbol"]
                 st.session_state["auto_analyze"] = True
                 st.rerun()
@@ -459,7 +459,7 @@ with st.sidebar:
     else:
         st.caption("（尚無標的）")
 
-    if symbol_input and st.button("加入自選", use_container_width=True):
+    if symbol_input and st.button("加入自選", width="stretch"):
         add_to_watchlist(symbol_input)
         st.success(f"{symbol_input.upper()} 已加入自選")
         st.rerun()
@@ -493,7 +493,7 @@ with st.sidebar:
             st.success("Server 已儲存")
 
     if _topic_input:
-        if st.button("發送測試通知", use_container_width=True):
+        if st.button("發送測試通知", width="stretch"):
             ok, msg = send(
                 "ntfy 連線測試成功！",
                 _topic_input,
@@ -548,7 +548,7 @@ with st.sidebar:
         _sig_add = _col_a.checkbox("補倉訊號", value=_sig["add"])
         _sig_red = _col_b.checkbox("減碼訊號", value=_sig["reduce"])
 
-        if st.button("儲存並安裝排程", type="primary", use_container_width=True):
+        if st.button("儲存並安裝排程", type="primary", width="stretch"):
             set_scan_times(_time_inputs)
             set_dedup_hours(_dedup)
             set_signal_filter(_sig_add, _sig_red)
@@ -563,12 +563,12 @@ with st.sidebar:
             with st.expander(f"目前已安裝 {len(_existing)} 個排程"):
                 for t in _existing:
                     st.code(t, language=None)
-                if st.button("移除全部排程", use_container_width=True):
+                if st.button("移除全部排程", width="stretch"):
                     ok, msg = scheduler.uninstall_all()
                     st.success(msg) if ok else st.error(msg)
                     st.rerun()
 
-        if st.button("立即掃描一次（測試）", use_container_width=True):
+        if st.button("立即掃描一次（測試）", width="stretch"):
             with st.spinner("掃描中..."):
                 ok, output = scheduler.run_now()
             if ok:
@@ -661,7 +661,7 @@ if mode == "總覽":
                     margin=dict(l=10, r=10, t=50, b=10), showlegend=False,
                     paper_bgcolor="#0e1117", font=dict(color="white"),
                 )
-                st.plotly_chart(pie1, use_container_width=True)
+                st.plotly_chart(pie1, width="stretch")
             else:
                 st.caption("（無可顯示的現值，請確認交易有填台幣金額）")
         with col_b:
@@ -679,7 +679,7 @@ if mode == "總覽":
                     margin=dict(l=10, r=10, t=50, b=10),
                     paper_bgcolor="#0e1117", font=dict(color="white"),
                 )
-                st.plotly_chart(pie2, use_container_width=True)
+                st.plotly_chart(pie2, width="stretch")
 
         st.divider()
 
@@ -703,7 +703,7 @@ if mode == "總覽":
             xaxis=dict(zeroline=True, zerolinecolor="rgba(255,255,255,0.3)",
                        gridcolor="rgba(255,255,255,0.05)"),
         )
-        st.plotly_chart(bar, use_container_width=True)
+        st.plotly_chart(bar, width="stretch")
         st.caption("🔴 紅 = 帳面獲利　🟢 綠 = 帳面虧損（台股紅漲綠跌慣例）")
 
         # ── 明細表 ──
@@ -718,7 +718,7 @@ if mode == "總覽":
             "損益(NT$)": round(r["pnl"]),
             "報酬率": f"{r['pnl_pct']:+.2f}%",
         } for r in _sorted])
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
 
     _render_overview()
     st.caption("💡 現值/損益的匯率以建倉成本內含值近似（未反映即時匯率變動）；"
@@ -835,7 +835,7 @@ if mode == "多標配置":
                 margin=dict(l=10, r=10, t=50, b=10),
                 showlegend=False,
             )
-            st.plotly_chart(pie, use_container_width=True)
+            st.plotly_chart(pie, width="stretch")
 
         with col_tbl:
             # 從帳務拉持倉，比對每個配置標的
@@ -855,7 +855,7 @@ if mode == "多標配置":
                     "風險": a.get("risk_level") or "-",
                     "估值": a.get("valuation_status") or "-",
                 })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
             st.caption("💡「需追加」= 目標金額 − 目前持倉，告訴你還要買多少才達到配置比例")
 
         st.divider()
@@ -872,7 +872,7 @@ if mode == "多標配置":
                 "建議": e.get("recommendation") or "-",
                 "排除原因": e.get("exclude_reason", ""),
             } for e in excluded]
-            st.dataframe(pd.DataFrame(ex_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(ex_rows), width="stretch", hide_index=True)
 
     st.stop()
 
@@ -918,7 +918,7 @@ if mode == "帳務":
                     _lbl = f"{m['symbol']}  ·  {m['name'][:22]}"
                     if m.get("exchange"):
                         _lbl += f"  ({m['exchange']})"
-                    if st.button(_lbl, key=f"tx_match_{_idx}_{m['symbol']}", use_container_width=True):
+                    if st.button(_lbl, key=f"tx_match_{_idx}_{m['symbol']}", width="stretch"):
                         st.session_state["tx_symbol_prefill"] = m["symbol"]
                         st.rerun()
 
@@ -986,7 +986,7 @@ if mode == "帳務":
         )
 
         submitted = st.button(
-            "儲存交易", type="primary", use_container_width=True,
+            "儲存交易", type="primary", width="stretch",
             key="tx_submit",
         )
         if submitted:
@@ -1230,7 +1230,7 @@ if mode == "帳務":
                 showgrid=False,
             ),
         )
-        st.plotly_chart(heat, use_container_width=True)
+        st.plotly_chart(heat, width="stretch")
         st.caption("綠 = 買進日 / 紅 = 賣出日 / 滑鼠移上去可看當日明細")
 
     st.divider()
@@ -1280,7 +1280,7 @@ if mode == "帳務":
                 edit_df,
                 key="tx_editor",
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
                 column_config={
                     "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
                     "刪除": st.column_config.CheckboxColumn(
@@ -1308,7 +1308,7 @@ if mode == "帳務":
 
             # 比對差異並儲存
             col_save, col_del = st.columns([1, 1])
-            if col_save.button("💾 儲存修改", type="primary", use_container_width=True):
+            if col_save.button("💾 儲存修改", type="primary", width="stretch"):
                 changes = 0
                 edit_lookup = {int(r["id"]): r for _, r in edited.iterrows()}
                 for orig in shown:
@@ -1357,7 +1357,7 @@ if mode == "帳務":
                 else:
                     st.info("沒有偵測到變更")
 
-            if col_del.button("🗑️ 刪除勾選", use_container_width=True):
+            if col_del.button("🗑️ 刪除勾選", width="stretch"):
                 to_delete = [int(r["id"]) for _, r in edited.iterrows() if r.get("刪除")]
                 if not to_delete:
                     st.info("沒有勾選任何項目")
@@ -1387,7 +1387,7 @@ if not analyze_btn:
                 "估值": h["valuation_status"],
                 "建議": h["recommendation"],
             })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
     st.stop()
 
 
@@ -1683,11 +1683,11 @@ with st.container(border=True):
     b1, b2 = st.columns(2)
     buy_clicked = b1.button(
         "🟢  記錄買進", type="primary",
-        use_container_width=True, key=f"q_buy_{used_sym}",
+        width="stretch", key=f"q_buy_{used_sym}",
     )
     sell_clicked = b2.button(
         "🔴  記錄賣出",
-        use_container_width=True, key=f"q_sell_{used_sym}",
+        width="stretch", key=f"q_sell_{used_sym}",
     )
     st.caption("💡 單價鎖定 = 當前市價；需要記錄歷史成交價請到「📒 帳務」新增交易")
 
@@ -1738,18 +1738,18 @@ c1, c2, c3, c4 = st.columns(4)
 _grade_color = {"green": "#2ecc71", "blue": "#3498db", "orange": "#f39c12", "red": "#e74c3c"}
 
 with c1:
-    st.plotly_chart(score_gauge(fund_result["total_score"], "基本面評分"), use_container_width=True)
+    st.plotly_chart(score_gauge(fund_result["total_score"], "基本面評分"), width="stretch")
     _col = _grade_color.get(fund_result["color"], "white")
     st.markdown(f"<div style='text-align:center;color:{_col};font-weight:600;margin-top:-12px'>{fund_result['grade']}</div>", unsafe_allow_html=True)
 
 with c2:
     risk_score = 100 - risk_result["risk_score"]
-    st.plotly_chart(score_gauge(risk_score, "穩定性評分"), use_container_width=True)
+    st.plotly_chart(score_gauge(risk_score, "穩定性評分"), width="stretch")
     _col = _grade_color.get(risk_result["color"], "white")
     st.markdown(f"<div style='text-align:center;color:{_col};font-weight:600;margin-top:-12px'>{risk_result['level']}</div>", unsafe_allow_html=True)
 
 with c3:
-    st.plotly_chart(score_gauge(val_result["valuation_score"], "估值合理度"), use_container_width=True)
+    st.plotly_chart(score_gauge(val_result["valuation_score"], "估值合理度"), width="stretch")
     _col = _grade_color.get(val_result["color"], "white")
     _label = f"{val_result['status']} — {val_result['suggestion']}"
     st.markdown(f"<div style='text-align:center;color:{_col};font-weight:600;margin-top:-12px;font-size:0.85rem'>{_label}</div>", unsafe_allow_html=True)
@@ -1777,7 +1777,7 @@ tab_chart, tab_a, tab_b, tab_c, tab_d, tab_e = st.tabs([
 # Tab: Price chart
 with tab_chart:
     fig = price_chart(data["history"], used_sym)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
     if ma200_bias is not None:
         bias_color = "green" if ma200_bias < -15 else "red" if ma200_bias > 15 else "blue"
         st.metric(
@@ -1794,13 +1794,13 @@ with tab_a:
     if fund_result.get("is_etf"):
         st.info(f"ETF評估：{fund_result.get('etf_summary', '')}")
     else:
-        st.plotly_chart(fundamental_bar(fund_result["details"]), use_container_width=True)
+        st.plotly_chart(fundamental_bar(fund_result["details"]), width="stretch")
 
         rows = []
         for k, (score, max_s, desc) in fund_result["details"].items():
             rows.append({"指標": k, "得分": score, "滿分": max_s, "說明": desc})
         df = pd.DataFrame(rows)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
 
 
 # Tab B: Risk
@@ -1810,7 +1810,7 @@ with tab_b:
     rows = []
     for k, v in risk_result["metrics"].items():
         rows.append({"指標": k, "數值": v["value"], "風險分數": v["risk_pts"], "說明": v["note"]})
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 
 # Tab C: Valuation
@@ -1820,7 +1820,7 @@ with tab_c:
     rows = []
     for k, v in val_result["metrics"].items():
         rows.append({"指標": k, "數值": v["value"], "合理度得分": v["score_pts"], "說明": v["note"]})
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     if ma200_bias is not None:
         st.info(f"均線乖離率公式：(股價 − MA200) / MA200 × 100% = **{ma200_bias:+.2f}%**")
@@ -1859,7 +1859,7 @@ with tab_d:
 
     col_chart, col_info = st.columns([1, 2])
     with col_chart:
-        st.plotly_chart(allocation_pie(alloc_result["invest_ratio"], alloc_result["cash_ratio"]), use_container_width=True)
+        st.plotly_chart(allocation_pie(alloc_result["invest_ratio"], alloc_result["cash_ratio"]), width="stretch")
     with col_info:
         st.markdown(f"**投入時機：** {alloc_result['schedule']}")
         if alloc_result["extra_buy"]:
@@ -1885,7 +1885,7 @@ with tab_e:
         if pos_result["add_triggered"]:
             st.success("補倉訊號觸發")
             if _topic_for_send:
-                if st.button("🔔 發送補倉通知", key="send_add_notify", use_container_width=True):
+                if st.button("🔔 發送補倉通知", key="send_add_notify", width="stretch"):
                     _title, _body = build_message(used_sym, "add", full_result)
                     _ok, _detail = send(_body, _topic_for_send, title=_title, tags="bell")
                     if _ok:
@@ -1897,7 +1897,7 @@ with tab_e:
         if pos_result["reduce_triggered"]:
             st.warning("減碼訊號觸發")
             if _topic_for_send:
-                if st.button("⚠️ 發送減碼通知", key="send_reduce_notify", use_container_width=True):
+                if st.button("⚠️ 發送減碼通知", key="send_reduce_notify", width="stretch"):
                     _title, _body = build_message(used_sym, "reduce", full_result)
                     _ok, _detail = send(_body, _topic_for_send, title=_title,
                                         priority="high", tags="warning")
@@ -1920,7 +1920,7 @@ with tab_e:
         "情境": ["持倉下跌 -10%（基本面未惡化）", "持倉下跌 -20%+", "估值過熱", "基本面惡化", "MA200乖離 > +20%"],
         "操作": ["啟動補倉", "強力補倉", "分批減碼 20%", "停止加碼，考慮出清", "暫停加碼"],
     }
-    st.dataframe(pd.DataFrame(ref_data), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(ref_data), width="stretch", hide_index=True)
 
 st.divider()
 st.caption(f"分析時間：{datetime.now().strftime('%Y-%m-%d %H:%M')}　資料來源：Yahoo Finance　本工具僅供參考，不構成投資建議。")

@@ -13,9 +13,15 @@ def normalize_symbol(symbol: str) -> str:
 
 def fetch_ticker(symbol: str) -> Tuple[Optional[yf.Ticker], str]:
     """Return (Ticker, used_symbol) or (None, symbol) on failure."""
+    raw = symbol.strip().upper()
     candidates = [normalize_symbol(symbol)]
-    if candidates[0] != symbol.upper():
-        candidates.append(symbol.upper())
+    # 台股純數字：先 .TW（上市），抓不到再試 .TWO（上櫃/OTC）
+    if "." not in raw and raw.isdigit():
+        two = raw + ".TWO"
+        if two not in candidates:
+            candidates.append(two)
+    if raw not in candidates:
+        candidates.append(raw)
 
     for sym in candidates:
         try:

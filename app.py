@@ -10,9 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
 from datetime import datetime
 
 from utils.data_fetcher import fetch_ticker, get_all_data, safe_float, get_fx_rate
@@ -43,22 +41,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
-st.markdown("""
-<style>
-    .metric-card {
-        background: #1e1e2e;
-        border-radius: 10px;
-        padding: 16px;
-        margin: 4px;
-    }
-    .big-score {
-        font-size: 3rem;
-        font-weight: 700;
-    }
-</style>
-""", unsafe_allow_html=True)
-
 
 # ─────────────────────────────────────────────
 # Helpers
@@ -200,6 +182,66 @@ def _cached_market_regime() -> dict:
     return market_regime.analyze()
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_fetch(symbol: str):
+    """抓取 + 整理單檔資料，快取 10 分鐘。回傳 (used_symbol, data) 或 (None, None)。
+    包成 cache 後，同一檔在分析頁的任何 rerun（記錄交易、改設定…）都直接命中，
+    不再每次重打 yfinance 抓 5 年歷史 + 三張財報，也避免重複寫入 analysis_history。"""
+    tk, used = fetch_ticker(symbol)
+    if tk is None:
+        return None, None
+    return used, get_all_data(tk)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_fx(from_ccy: str, to_ccy: str):
+    """匯率快取，避免每次 rerun / 每筆外幣明細都打一次 yfinance。"""
+    return get_fx_rate(from_ccy, to_ccy)
+
+
+@st.cache_data(ttl=3, show_spinner=False)
+def _cached_quote(symbol: str):
+    """即時報價（持倉卡片與投資組合總覽共用）。TTL 短以配合自動更新 fragment。"""
+    try:
+        tk, _ = fetch_ticker(symbol)
+        if not tk:
+            return None
+        info = tk.info or {}
+        return {
+            "cur_price": (info.get("currentPrice") or info.get("regularMarketPrice")
+                          or info.get("previousClose")),
+            "name": info.get("longName") or info.get("shortName") or symbol,
+            "currency": info.get("currency", ""),
+        }
+    except Exception:
+        return None
+
+
+def _classify_market(symbol: str, currency: str = None) -> str:
+    """依代碼/幣別粗分 台股 / 美股 / 其他（帳務與總覽共用）。"""
+    s = (symbol or "").upper()
+    if s.endswith(".TW") or s.endswith(".TWO"):
+        return "台股"
+    if currency == "TWD":
+        return "台股"
+    # 純數字（4-6 碼）= 台股代號（即使存檔時沒加 .TW）
+    if s.isdigit() and 4 <= len(s) <= 6:
+        return "台股"
+    if currency == "USD" or s.isalpha():
+        return "美股"
+    return "其他"
+
+
+def _holding_value_twd(h: dict, cur_price):
+    """單一持倉的台幣現值與損益。與帳務卡片同一套公式（匯率以成本內含值近似）。
+    回傳 (cur_value_twd, pnl_twd, pnl_pct)。"""
+    if cur_price and h.get("avg_cost"):
+        pnl_pct = (cur_price - h["avg_cost"]) / h["avg_cost"] * 100
+        cur_value_twd = (cur_price / h["avg_cost"]) * h["twd_cost"]
+        return cur_value_twd, cur_value_twd - h["twd_cost"], pnl_pct
+    return h["twd_cost"], 0.0, 0.0
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _cached_index_history(symbol: str, period: str = "1y"):
     """Fetch index history for chart rendering. Returns dict with close/ma50/ma200/dates."""
@@ -302,6 +344,7 @@ with st.sidebar:
         ("單檔分析", "📊"),
         ("多標配置", "🎯"),
         ("帳務", "📒"),
+        ("總覽", "💼"),
     ]
     for _name, _icon in _modes:
         _is_active = st.session_state["mode"] == _name
@@ -549,6 +592,141 @@ _render_market_charts()
 st.divider()
 
 # ─────────────────────────────────────────────
+# 投資組合總覽模式
+# ─────────────────────────────────────────────
+if mode == "總覽":
+    st.subheader("💼 投資組合總覽")
+    st.caption("彙整所有持倉的成本、現值、損益與配置分布（現價即時抓取）")
+
+    _all_holdings = get_holdings()
+    if not _all_holdings:
+        st.info("尚無持倉，先到「📒 帳務」記錄買進交易後再回來看總覽")
+        st.stop()
+
+    _ov_secs = st.selectbox(
+        "更新頻率",
+        options=[0, 10, 30, 60],
+        format_func=lambda x: {0: "暫停", 10: "每 10 秒", 30: "每 30 秒", 60: "每 1 分鐘"}[x],
+        index=2,
+        key="ov_refresh_secs",
+        help="自動重抓現價更新總覽；盤後或夜間建議調至暫停",
+    )
+
+    @st.fragment(run_every=f"{_ov_secs}s" if _ov_secs > 0 else None)
+    def _render_overview():
+        rows = []
+        total_cost = total_value = 0.0
+        mkt_value = {"台股": 0.0, "美股": 0.0, "其他": 0.0}
+        for h in _all_holdings:
+            q = _cached_quote(h["symbol"])
+            cur_price = q["cur_price"] if q else None
+            name = q["name"] if q else h["symbol"]
+            cur_value_twd, pnl_twd, pnl_pct = _holding_value_twd(h, cur_price)
+            total_cost += h["twd_cost"]
+            total_value += cur_value_twd
+            mkt = _classify_market(h["symbol"], h.get("currency"))
+            mkt_value[mkt] = mkt_value.get(mkt, 0.0) + cur_value_twd
+            rows.append({
+                "symbol": h["symbol"], "name": name, "market": mkt,
+                "shares": h["shares"], "cur_price": cur_price,
+                "cost": h["twd_cost"], "value": cur_value_twd,
+                "pnl": pnl_twd, "pnl_pct": pnl_pct,
+            })
+
+        total_pnl = total_value - total_cost
+        total_pct = (total_pnl / total_cost * 100) if total_cost else 0
+
+        # ── 關鍵數字 ──
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("持倉檔數", f"{len(rows)} 檔")
+        m2.metric("總成本", f"NT${total_cost:,.0f}")
+        m3.metric("估計現值", f"NT${total_value:,.0f}")
+        m4.metric("未實現損益", f"NT${total_pnl:+,.0f}", f"{total_pct:+.2f}%")
+
+        st.divider()
+
+        # ── 兩個圓餅：各標的占比 / 市場分布 ──
+        _value_rows = [r for r in rows if r["value"] > 0]
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if _value_rows:
+                pie1 = go.Figure(go.Pie(
+                    labels=[r["symbol"] for r in _value_rows],
+                    values=[r["value"] for r in _value_rows],
+                    hole=0.45, textinfo="label+percent",
+                    hovertemplate="<b>%{label}</b><br>現值 NT$%{value:,.0f}<br>%{percent}<extra></extra>",
+                ))
+                pie1.update_layout(
+                    title="各標的現值占比", height=340,
+                    margin=dict(l=10, r=10, t=50, b=10), showlegend=False,
+                    paper_bgcolor="#0e1117", font=dict(color="white"),
+                )
+                st.plotly_chart(pie1, use_container_width=True)
+            else:
+                st.caption("（無可顯示的現值，請確認交易有填台幣金額）")
+        with col_b:
+            _mkt_items = [(k, v) for k, v in mkt_value.items() if v > 0]
+            if _mkt_items:
+                pie2 = go.Figure(go.Pie(
+                    labels=[k for k, _ in _mkt_items],
+                    values=[v for _, v in _mkt_items],
+                    hole=0.45, textinfo="label+percent",
+                    marker_colors=["#f39c12", "#9b59b6", "#7f8c8d"],
+                    hovertemplate="<b>%{label}</b><br>現值 NT$%{value:,.0f}<br>%{percent}<extra></extra>",
+                ))
+                pie2.update_layout(
+                    title="市場分布（台股 / 美股）", height=340,
+                    margin=dict(l=10, r=10, t=50, b=10),
+                    paper_bgcolor="#0e1117", font=dict(color="white"),
+                )
+                st.plotly_chart(pie2, use_container_width=True)
+
+        st.divider()
+
+        # ── 各標的未實現損益長條（台股慣例：紅賺綠賠）──
+        _sorted = sorted(rows, key=lambda r: r["pnl"], reverse=True)
+        bar = go.Figure(go.Bar(
+            x=[r["pnl"] for r in _sorted],
+            y=[r["symbol"] for r in _sorted],
+            orientation="h",
+            marker_color=["#e74c3c" if r["pnl"] > 0 else "#2ecc71" if r["pnl"] < 0 else "#95a5a6"
+                          for r in _sorted],
+            text=[f"{r['pnl']:+,.0f} ({r['pnl_pct']:+.1f}%)" for r in _sorted],
+            textposition="auto",
+            hovertemplate="<b>%{y}</b><br>未實現 NT$%{x:,.0f}<extra></extra>",
+        ))
+        bar.update_layout(
+            title="各標的未實現損益（NT$）",
+            height=max(220, 38 * len(_sorted) + 90),
+            margin=dict(l=10, r=10, t=50, b=30),
+            paper_bgcolor="#0e1117", plot_bgcolor="#0e1117", font=dict(color="white"),
+            xaxis=dict(zeroline=True, zerolinecolor="rgba(255,255,255,0.3)",
+                       gridcolor="rgba(255,255,255,0.05)"),
+        )
+        st.plotly_chart(bar, use_container_width=True)
+        st.caption("🔴 紅 = 帳面獲利　🟢 綠 = 帳面虧損（台股紅漲綠跌慣例）")
+
+        # ── 明細表 ──
+        df = pd.DataFrame([{
+            "代碼": r["symbol"],
+            "名稱": r["name"][:18],
+            "市場": r["market"],
+            "股數": round(r["shares"], 4),
+            "現價": round(r["cur_price"], 4) if r["cur_price"] else None,
+            "成本(NT$)": round(r["cost"]),
+            "現值(NT$)": round(r["value"]),
+            "損益(NT$)": round(r["pnl"]),
+            "報酬率": f"{r['pnl_pct']:+.2f}%",
+        } for r in _sorted])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+    _render_overview()
+    st.caption("💡 現值/損益的匯率以建倉成本內含值近似（未反映即時匯率變動）；"
+               "已實現損益與已出清標的未納入，僅供參考。")
+    st.stop()
+
+
+# ─────────────────────────────────────────────
 # 多標配置模式
 # ─────────────────────────────────────────────
 if mode == "多標配置":
@@ -707,19 +885,6 @@ if mode == "帳務":
     st.subheader("📒 帳務")
     st.caption("記錄每筆買賣，自動計算加權平均成本，給自動掃描判斷補倉訊號")
 
-    def _classify_market(symbol: str, currency: str = None) -> str:
-        s = (symbol or "").upper()
-        if s.endswith(".TW") or s.endswith(".TWO"):
-            return "台股"
-        if currency == "TWD":
-            return "台股"
-        # 純數字（4-6 碼）= 台股代號（即使存檔時沒加 .TW）
-        if s.isdigit() and 4 <= len(s) <= 6:
-            return "台股"
-        if currency == "USD" or s.isalpha():
-            return "美股"
-        return "其他"
-
     _market_filter = st.radio(
         "市場",
         ["🌐 全部", "🇹🇼 台股", "🇺🇸 美股"],
@@ -810,7 +975,7 @@ if mode == "帳務":
                     help=f"實際扣款 {tx_currency} 金額（含手續費）",
                 )
                 # 換算成 TWD 存進 DB
-                _fx_native_to_twd = get_fx_rate(tx_currency, "TWD")
+                _fx_native_to_twd = _cached_fx(tx_currency, "TWD")
                 tx_twd = _amt_input * _fx_native_to_twd if _fx_native_to_twd else 0
                 if _fx_native_to_twd and _amt_input > 0:
                     st.caption(f"≈ NT${tx_twd:,.0f}（匯率 {_fx_native_to_twd:.4f}）")
@@ -830,7 +995,7 @@ if mode == "帳務":
             else:
                 final_twd = tx_twd
                 if tx_currency != "TWD" and final_twd <= 0:
-                    fx = get_fx_rate(tx_currency, "TWD")
+                    fx = _cached_fx(tx_currency, "TWD")
                     if fx:
                         final_twd = tx_price * tx_shares * fx
                 add_transaction(
@@ -878,24 +1043,7 @@ if mode == "帳務":
             help="自動重抓現價更新損益。台股盤後或夜間建議調至暫停",
         )
 
-        # 快取 quote — TTL 設成最短間隔的一半確保更新
-        @st.cache_data(ttl=3, show_spinner=False)
-        def _cached_quote(symbol: str):
-            try:
-                tk, _ = fetch_ticker(symbol)
-                if not tk:
-                    return None
-                info = tk.info or {}
-                return {
-                    "cur_price": (info.get("currentPrice") or info.get("regularMarketPrice")
-                                  or info.get("previousClose")),
-                    "name": info.get("longName") or info.get("shortName") or symbol,
-                    "currency": info.get("currency", ""),
-                }
-            except Exception:
-                return None
-
-        # 用 fragment 包卡片區段，做局部自動更新
+        # 用 fragment 包卡片區段，做局部自動更新（_cached_quote 已在模組層共用）
         @st.fragment(run_every=f"{_refresh_secs}s" if _refresh_secs > 0 else None)
         def _render_holdings_cards():
             total_cost = 0.0
@@ -907,17 +1055,8 @@ if mode == "帳務":
                 cur_price = q["cur_price"] if q else None
                 name = q["name"] if q else h["symbol"]
 
-                if cur_price and h["avg_cost"]:
-                    pnl_pct = (cur_price - h["avg_cost"]) / h["avg_cost"] * 100
-                    per_share_twd_cost = h["twd_cost"] / h["shares"] if h["shares"] else 0
-                    cur_value_twd = (cur_price / h["avg_cost"]) * per_share_twd_cost * h["shares"]
-                    pnl_twd = cur_value_twd - h["twd_cost"]
-                    total_value += cur_value_twd
-                else:
-                    pnl_pct = 0
-                    pnl_twd = 0
-                    cur_value_twd = h["twd_cost"]
-                    total_value += h["twd_cost"]
+                cur_value_twd, pnl_twd, pnl_pct = _holding_value_twd(h, cur_price)
+                total_value += cur_value_twd
 
                 # 台股色：紅漲綠跌
                 _pnl_color = "#e74c3c" if pnl_pct > 0 else ("#2ecc71" if pnl_pct < 0 else "#95a5a6")
@@ -1026,18 +1165,7 @@ if mode == "帳務":
         # 取最近 1 年
         today = _date.today()
         start = today - _td(days=365)
-        all_dates = [start + _td(days=i) for i in range((today - start).days + 1)]
-
-        # 排列成 week x weekday 熱圖
-        # x = ISO 週序 (連續整數，起點 0)
-        # y = 星期幾 (0=週一 ... 6=週日)
-        week0 = start.isocalendar()[1]
-        year0 = start.isocalendar()[0]
-
-        z = []          # values
-        text = []       # hover text
-        x_labels = []   # 週日期標記
-
+        # 排列成 week x weekday 熱圖（y = 星期幾 0=週一 … 6=週日）
         # 7 列 (週一-週日) × N 欄
         rows_z = {i: [] for i in range(7)}
         rows_text = {i: [] for i in range(7)}
@@ -1130,7 +1258,7 @@ if mode == "帳務":
                 ccy = t.get("currency") or "TWD"
                 twd_amt = float(t.get("twd_amount") or 0)
                 if ccy != "TWD" and twd_amt > 0:
-                    fx_twd_to_native = get_fx_rate("TWD", ccy)
+                    fx_twd_to_native = _cached_fx("TWD", ccy)
                     native_amt = twd_amt * fx_twd_to_native if fx_twd_to_native else twd_amt
                 else:
                     native_amt = twd_amt
@@ -1191,7 +1319,7 @@ if mode == "帳務":
                     new_ccy = str(new_row["幣別"])
                     new_native = float(new_row["金額(原幣)"])
                     if new_ccy != "TWD" and new_native > 0:
-                        _fx = get_fx_rate(new_ccy, "TWD")
+                        _fx = _cached_fx(new_ccy, "TWD")
                         new_twd = new_native * _fx if _fx else new_native
                     else:
                         new_twd = new_native
@@ -1268,16 +1396,15 @@ if not symbol_input:
     st.stop()
 
 
-# ── Fetch data ────────────────────────────────
+# ── Fetch data（快取 10 分鐘；同一檔的 rerun 直接命中，不再每次重抓）────
 with st.spinner(f"正在抓取 {symbol_input.upper()} 資料..."):
-    ticker, used_sym = fetch_ticker(symbol_input)
+    used_sym, data = _cached_fetch(symbol_input)
 
-if ticker is None:
+if data is None:
     st.error(f"找不到 {symbol_input}，請確認代碼正確（台灣股票使用數字代碼，如 0050、2330）")
     st.stop()
 
 with st.spinner("分析中..."):
-    data = get_all_data(ticker)
     info = data["info"]
 
     fund_result = fundamental.calculate(data)
@@ -1292,7 +1419,7 @@ with st.spinner("分析中..."):
     fx_rate = None      # 1 TWD = ? stock_currency
     budget_in_stock_ccy = twd_budget
     if stock_currency not in ("TWD", ""):
-        fx_rate = get_fx_rate("TWD", stock_currency)
+        fx_rate = _cached_fx("TWD", stock_currency)
         if fx_rate:
             budget_in_stock_ccy = twd_budget * fx_rate
 
@@ -1362,7 +1489,11 @@ with st.spinner("分析中..."):
         "position": pos_result,
         "current_price_str": price_str_notify,
     }
-    save_analysis(used_sym, full_result)
+    # 每檔每天只寫一筆 analysis_history，避免 rerun（記錄交易、改設定…）灌爆紀錄
+    _save_key = f"{used_sym}|{datetime.now():%Y-%m-%d}"
+    if st.session_state.get("_last_analysis_saved") != _save_key:
+        save_analysis(used_sym, full_result)
+        st.session_state["_last_analysis_saved"] = _save_key
 
     # 將完整結果存到 session，給「手動發送通知」按鈕使用
     st.session_state["_last_full_result"] = full_result
@@ -1456,7 +1587,7 @@ with st.container(border=True):
 
     _fx_to_twd = None
     if _cur_ccy != "TWD":
-        _fx_to_twd = get_fx_rate(_cur_ccy, "TWD")
+        _fx_to_twd = _cached_fx(_cur_ccy, "TWD")
 
     # 是否為外幣股票（決定要不要顯示幣別切換）
     _is_foreign = (_cur_ccy != "TWD") and _fx_to_twd
@@ -1520,7 +1651,7 @@ with st.container(border=True):
                     if _cur_ccy == "TWD":
                         q_shares = _in_amt / q_price
                     elif _fx_to_twd:
-                        fx_twd_to_native = get_fx_rate("TWD", _cur_ccy)
+                        fx_twd_to_native = _cached_fx("TWD", _cur_ccy)
                         q_shares = (_in_amt * fx_twd_to_native / q_price) if fx_twd_to_native else 0
                     else:
                         q_shares = 0

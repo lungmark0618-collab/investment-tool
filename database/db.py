@@ -347,6 +347,69 @@ def get_avg_cost(symbol: str) -> Optional[float]:
     return None
 
 
+def get_realized_pnl() -> List[Dict]:
+    """FIFO 計算每檔『已實現損益』(TWD)，含已完全出清的標的。
+
+    已實現損益 = 賣出金額(TWD) − 賣出股數對應的 FIFO 成本(TWD)。
+    金額皆以交易當下存入的 twd_amount 計算（已內含當時匯率），不需即時匯率。
+    只回傳有過賣出的標的。
+    回傳: [{symbol, realized_twd, proceeds_twd, cost_twd, currency, last_sell_date}]
+    """
+    init_db()
+    with _get_engine().connect() as conn:
+        rows = conn.execute(
+            text("SELECT * FROM transactions ORDER BY symbol, trade_date, id")
+        ).mappings().fetchall()
+    txs_by_sym: Dict[str, List[Dict]] = {}
+    for r in rows:
+        d = dict(r)
+        txs_by_sym.setdefault(d["symbol"], []).append(d)
+
+    result = []
+    for sym, txs in txs_by_sym.items():
+        lots: List[Dict] = []
+        realized = 0.0
+        proceeds_total = 0.0
+        cost_total = 0.0
+        last_sell = None
+        had_sell = False
+        for tx in txs:
+            if tx["action"] == "buy":
+                lots.append({"shares": tx["shares"], "twd": tx.get("twd_amount") or 0})
+            else:  # sell
+                had_sell = True
+                remain = tx["shares"]
+                proceeds = tx.get("twd_amount") or 0
+                cost_of_sold = 0.0
+                while remain > 0 and lots:
+                    lot = lots[0]
+                    if lot["shares"] <= remain:
+                        remain -= lot["shares"]
+                        cost_of_sold += lot["twd"]
+                        lots.pop(0)
+                    else:
+                        ratio = remain / lot["shares"]
+                        cost_of_sold += lot["twd"] * ratio
+                        lot["shares"] -= remain
+                        lot["twd"] *= (1 - ratio)
+                        remain = 0
+                realized += proceeds - cost_of_sold
+                proceeds_total += proceeds
+                cost_total += cost_of_sold
+                last_sell = tx["trade_date"]
+
+        if had_sell:
+            result.append({
+                "symbol": sym,
+                "realized_twd": realized,
+                "proceeds_twd": proceeds_total,
+                "cost_twd": cost_total,
+                "currency": txs[-1].get("currency") or "TWD",
+                "last_sell_date": last_sell,
+            })
+    return result
+
+
 # ── Analysis history ─────────────────────────────────────────────────────
 def save_analysis(symbol: str, result: Dict[str, Any]):
     init_db()

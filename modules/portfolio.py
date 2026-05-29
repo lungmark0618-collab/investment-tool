@@ -6,7 +6,9 @@ from typing import List, Dict, Any
 
 
 RISK_MULT = {"保守型": 1.2, "中性型": 1.0, "高風險型": 0.7}
-VAL_MULT = {"低估": 1.3, "合理": 1.0, "偏高": 0.7, "過熱": 0.3}
+# key 必須對應 valuation.calculate() 實際產出的 status 字串
+# （"明顯低估" / "合理" / "高估" / "過熱"），否則 .get() 會默默退回 1.0
+VAL_MULT = {"明顯低估": 1.3, "合理": 1.0, "高估": 0.7, "過熱": 0.3}
 EXCLUDE_ACTIONS = {"不建議投入", None, ""}
 
 
